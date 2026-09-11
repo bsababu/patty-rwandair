@@ -154,6 +154,10 @@ Redis access. Deploying the frontend and database to Vercel does not run the
 NestJS API automatically. A same-origin reverse proxy is preferred because it
 avoids cross-site session-cookie behavior.
 
+Docker remains an optional self-hosted deployment and local dependency stack.
+It is validated separately from the required application CI because Vercel
+does not deploy the Compose web/API containers.
+
 ## Authentication troubleshooting
 
 - Before login, `GET /api/v1/auth/me` should return `401`, not `404`. A `401`

@@ -34,11 +34,3 @@ jobs:
           DATABASE_URL: postgresql://wingsbalance:ci-only@127.0.0.1:5432/wingsbalance
       - run: npm test
       - run: npm run build
-  docker:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - run: cp .env.example .env
-      - run: docker compose config --quiet
-      - run: docker compose build web api migrate

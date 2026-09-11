@@ -7,7 +7,13 @@ dist
 .wrangler
 .git
 .env
+.env.*
+!.env.example
 *.dump
 infra/tls
 work
 outputs
+.openai
+.github
+coverage
+*.log
