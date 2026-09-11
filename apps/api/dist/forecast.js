@@ -1,0 +1,5 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.suggestLoad = suggestLoad;
+function suggestLoad(passengers, route, history, bufferPct = .05) { const routeRows = history.filter(x => x.route === route && x.passengers > 0); const rows = routeRows.length >= 5 ? routeRows : history.filter(x => x.passengers > 0); if (!rows.length)
+    return { baseline: passengers, safetyBuffer: Math.ceil(passengers * bufferPct), suggested: Math.ceil(passengers * (1 + bufferPct)), confidence: 'LOW', sampleSize: 0, source: 'network default' }; const weights = rows.map(x => 1 / Math.max(1, x.ageDays)); const rate = rows.reduce((sum, x, i) => sum + x.consumed / x.passengers * weights[i], 0) / weights.reduce((a, b) => a + b, 0); const baseline = Math.ceil(rate * passengers); const safetyBuffer = Math.ceil(baseline * bufferPct); return { baseline, safetyBuffer, suggested: baseline + safetyBuffer, confidence: routeRows.length >= 12 ? 'HIGH' : routeRows.length >= 5 ? 'MEDIUM' : 'LOW', sampleSize: rows.length, source: routeRows.length >= 5 ? 'route recent average' : 'network average' }; }

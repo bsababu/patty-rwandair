@@ -1,0 +1,39 @@
+{
+  "name": "@wingsbalance/api",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/run-local.mjs ./node_modules/@nestjs/cli/bin/nest.js start --watch",
+    "dev:local": "npm run dev",
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "test": "tsx --test src/*.spec.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "prisma:migrate:local": "node scripts/run-local.mjs ./node_modules/prisma/build/index.js migrate deploy",
+    "seed": "tsx prisma/seed.ts",
+    "seed:local": "node scripts/run-local.mjs --import tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "@nestjs/swagger": "^11.2.0",
+    "@prisma/client": "^6.15.0",
+    "argon2": "^0.44.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "cookie-parser": "^1.4.7",
+    "ioredis": "^5.7.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "prisma": "^6.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,367 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+enum Role {
+  ATTENDANT
+  LEAD
+  PROCUREMENT
+  DIRECTOR
+  ADMIN
+}
+enum Cabin {
+  ECONOMY
+  BUSINESS
+}
+enum FlightStatus {
+  SCHEDULED
+  BOARDING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+enum ReportStatus {
+  DRAFT
+  SUBMITTED
+  FORWARDED
+  RETURNED
+  REJECTED
+  APPROVED
+}
+enum MovementReason {
+  LOAD
+  APPROVED_CONSUMPTION
+  RETURN
+  SPOILAGE
+  DISCARD
+  CORRECTION
+  REVERSAL
+  RECEIPT
+  MISSING
+}
+enum ImportType {
+  FLIGHTS
+  CATERING
+  CREW
+}
+enum ImportStatus {
+  PREVIEWED
+  COMMITTED
+  CANCELLED
+  FAILED
+}
+model User {
+  id String @id @default(uuid())
+  email String @unique
+  passwordHash String
+  name String
+  role Role
+  active Boolean @default(true)
+  failedLoginAttempts Int @default(0)
+  lockedUntil DateTime?
+  passwordChangedAt DateTime @default(now())
+  sessionVersion Int @default(1)
+  createdAt DateTime @default(now())
+  assignments CrewAssignment[]
+  reports FlightReport[]
+  approvals Approval[]
+  auditEvents AuditEvent[]
+  notifications Notification[]
+  crewSubmissions CrewSubmission[]
+  importBatches ImportBatch[]
+  leadFlights Flight[] @relation("FlightLead")
+  cateringLists CateringList[] @relation("CateringListOwner")
+}
+model Flight {
+  id String @id @default(uuid())
+  flightNumber String
+  flightDate DateTime
+  aircraft String
+  status FlightStatus @default(SCHEDULED)
+  version Int @default(1)
+  leadId String?
+  lead User? @relation("FlightLead", fields: [leadId], references: [id])
+  cateringListId String?
+  cateringList CateringList? @relation(fields: [cateringListId], references: [id])
+  sectors Sector[]
+  assignments CrewAssignment[]
+  crewSubmissions CrewSubmission[]
+  manifests Manifest[]
+  report FlightReport?
+  @@unique([flightNumber, flightDate])
+  @@index([flightDate, status])
+  @@index([leadId, flightDate])
+  @@index([cateringListId])
+}
+model Sector {
+  id String @id @default(uuid())
+  flightId String
+  flight Flight @relation(fields: [flightId], references: [id])
+  sequence Int
+  origin String
+  destination String
+  scheduledDeparture DateTime
+  scheduledArrival DateTime
+  economyPax Int
+  businessPax Int
+  manifests Manifest[]
+  @@unique([flightId, sequence])
+}
+model CrewAssignment {
+  id String @id @default(uuid())
+  flightId String
+  flight Flight @relation(fields: [flightId], references: [id])
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  duty String
+  @@unique([flightId, userId])
+}
+model CrewSubmission {
+  id String @id @default(uuid())
+  flightId String
+  flight Flight @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  duty String
+  notes String?
+  submittedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([flightId, userId])
+  @@index([flightId, submittedAt])
+}
+model CatalogItem {
+  id String @id @default(uuid())
+  sku String @unique
+  nameEn String
+  nameFr String
+  category String
+  unit String
+  shelfLifeHours Int?
+  active Boolean @default(true)
+  reorderPoint Int @default(0)
+  prices ItemPrice[]
+  lots InventoryLot[]
+  manifestLines ManifestLine[]
+  movements StockMovement[]
+  cateringListLines CateringListLine[]
+}
+model ItemPrice {
+  id String @id @default(uuid())
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  amountMinor BigInt
+  currency String @default("RWF")
+  effectiveFrom DateTime
+  effectiveTo DateTime?
+  @@index([itemId, effectiveFrom])
+}
+model InventoryLot {
+  id String @id @default(uuid())
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  supplier String?
+  lotCode String
+  quantity Int
+  expiresAt DateTime?
+  receivedAt DateTime @default(now())
+}
+model Manifest {
+  id String @id @default(uuid())
+  flightId String
+  flight Flight @relation(fields: [flightId], references: [id])
+  sectorId String
+  sector Sector @relation(fields: [sectorId], references: [id])
+  cabin Cabin
+  version Int @default(1)
+  status String @default("DRAFT")
+  lines ManifestLine[]
+  @@unique([sectorId, cabin])
+}
+model ManifestLine {
+  id String @id @default(uuid())
+  manifestId String
+  manifest Manifest @relation(fields: [manifestId], references: [id])
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  suggested Int
+  planned Int
+  approved Int
+  loaded Int
+  consumed Int @default(0)
+  returned Int @default(0)
+  spoiled Int @default(0)
+  discarded Int @default(0)
+  overrideReason String?
+  remarks String?
+  @@unique([manifestId, itemId])
+}
+model FlightReport {
+  id String @id @default(uuid())
+  flightId String @unique
+  flight Flight @relation(fields: [flightId], references: [id])
+  purserId String
+  purser User @relation(fields: [purserId], references: [id])
+  purserName String
+  notes String?
+  status ReportStatus @default(DRAFT)
+  version Int @default(1)
+  submittedAt DateTime?
+  approvedAt DateTime?
+  approvals Approval[]
+  lines ReportLine[]
+}
+model ReportLine {
+  id String @id @default(uuid())
+  reportId String
+  report FlightReport @relation(fields: [reportId], references: [id])
+  manifestLineId String
+  consumed Int
+  returned Int
+  spoiled Int
+  discarded Int
+  unexplained Int
+  remarks String?
+  revision Int @default(1)
+  @@unique([reportId, manifestLineId, revision])
+  @@index([reportId, revision])
+}
+model Approval {
+  id String @id @default(uuid())
+  reportId String
+  report FlightReport @relation(fields: [reportId], references: [id])
+  actorId String
+  actor User @relation(fields: [actorId], references: [id])
+  decision ReportStatus
+  reason String?
+  createdAt DateTime @default(now())
+}
+model StockMovement {
+  id String @id @default(uuid())
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  quantity Int
+  reason MovementReason
+  flightId String?
+  reversalOfId String?
+  operationId String @unique
+  unitCostMinor BigInt
+  currency String @default("RWF")
+  createdAt DateTime @default(now())
+  @@index([itemId, createdAt])
+  @@index([flightId])
+}
+model Forecast {
+  id String @id @default(uuid())
+  flightId String
+  itemId String
+  cabin Cabin
+  baseline Float
+  safetyBuffer Float
+  suggested Int
+  approved Int?
+  confidence String
+  sampleSize Int
+  explanation String
+  createdAt DateTime @default(now())
+  @@index([flightId])
+}
+model AuditEvent {
+  id String @id @default(uuid())
+  actorId String?
+  actor User? @relation(fields: [actorId], references: [id])
+  action String
+  entityType String
+  entityId String
+  metadata Json?
+  createdAt DateTime @default(now())
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+model IdempotencyKey {
+  key String @id
+  response Json
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  @@index([expiresAt])
+}
+model SyncOperation {
+  id String @id
+  userId String
+  flightId String
+  manifestVersion Int
+  payload Json
+  status String @default("APPLIED")
+  createdAt DateTime @default(now())
+  @@index([flightId, createdAt])
+}
+model Notification {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  title String
+  body String
+  kind String @default("GENERAL")
+  flightId String?
+  actionPath String?
+  readAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+}
+model CateringList {
+  id String @id @default(uuid())
+  name String @unique
+  flightNumber String
+  serviceDate DateTime
+  version Int @default(1)
+  status String @default("READY")
+  createdById String
+  createdBy User @relation("CateringListOwner", fields: [createdById], references: [id])
+  lines CateringListLine[]
+  flights Flight[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([flightNumber, serviceDate])
+  @@index([flightNumber, serviceDate, status])
+}
+model CateringListLine {
+  id String @id @default(uuid())
+  cateringListId String
+  cateringList CateringList @relation(fields: [cateringListId], references: [id], onDelete: Cascade)
+  sectorSequence Int
+  cabin Cabin
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  suggested Int
+  planned Int
+  approved Int
+  loaded Int
+  overrideReason String?
+  @@unique([cateringListId, sectorSequence, cabin, itemId])
+  @@index([itemId])
+}
+model ImportBatch {
+  id String @id @default(uuid())
+  type ImportType
+  status ImportStatus @default(PREVIEWED)
+  fileName String
+  checksum String
+  sourceText String
+  rows Json
+  rowCount Int
+  errorCount Int
+  actorId String
+  actor User @relation(fields: [actorId], references: [id])
+  result Json?
+  createdAt DateTime @default(now())
+  committedAt DateTime?
+  @@index([actorId, createdAt])
+  @@index([type, status, createdAt])
+}
+model SeedRun {
+  key String @id
+  completedAt DateTime @default(now())
+}

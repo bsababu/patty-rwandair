@@ -1,0 +1,4 @@
+flight_number,flight_date,sector_sequence,cabin,item_sku,suggested,planned,approved,loaded,override_reason
+WB435,2026-09-01,1,ECONOMY,MEAL-CHK,104,108,108,108,Passenger safety buffer approved
+WB435,2026-09-01,1,ECONOMY,WATER-500,150,154,154,154,Passenger safety buffer approved
+WB435,2026-09-01,1,BUSINESS,MEAL-CHK,12,16,16,16,Business cabin service buffer
