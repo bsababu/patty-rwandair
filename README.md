@@ -138,7 +138,7 @@ Node.js version: 22
 
 Set `NEXT_PUBLIC_API_URL` in the Vercel project environment to the reachable
 API origin, for example `https://api.example.rw`. The default `/api` value is
-for the local Vite proxy or a same-origin reverse proxy; it is not an API
+for the local Next.js rewrite or a same-origin reverse proxy; it is not an API
 deployment by itself.
 
 For a separate API origin, configure the API with:

@@ -762,7 +762,12 @@ function Attendant({ lang, active }: { lang: "EN" | "FR"; active: string }) {
           notes,
         }),
       });
-      setDetail({ ...fresh, report: { status: "SUBMITTED" } });
+      setDetail({
+        ...fresh,
+        report: fresh.report
+          ? { ...fresh.report, status: "SUBMITTED" }
+          : { id: operationId(), status: "SUBMITTED" },
+      });
       setSync("Awaiting approval");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Submission failed");
@@ -918,7 +923,7 @@ function Attendant({ lang, active }: { lang: "EN" | "FR"; active: string }) {
             <h2>{lang === "FR" ? "Service cabine" : "Cabin service"}</h2>
           </div>
           <div className="service-tabs">
-          {detail.sectors.length > 1 && <div className="tabs sector-tabs" aria-label="Flight sector">{detail.sectors.map((item) => <button key={item.id} className={sectorId === item.id ? "active" : ""} onClick={() => setSectorId(item.id)}>S{item.sequence || ""} {item.origin}–{item.destination}</button>)}</div>}
+          {detail.sectors.length > 1 && <div className="tabs sector-tabs" aria-label="Flight sector">{detail.sectors.map((item) => item.id && <button key={item.id} className={sectorId === item.id ? "active" : ""} onClick={() => setSectorId(item.id!)}>S{item.sequence || ""} {item.origin}–{item.destination}</button>)}</div>}
           <div className="tabs">
             <button
               className={cabin === "ECONOMY" ? "active" : ""}
