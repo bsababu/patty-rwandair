@@ -8,6 +8,7 @@ export type SessionUser = {
 let csrf = "";
 let offlineUserId = "";
 let offlineRole: Role | "" = "";
+const apiOrigin = (process.env.NEXT_PUBLIC_API_URL || "/api").replace(/\/+$/, "");
 const DB = "wingsbalance-offline",
   STORE = "operations",
   CACHE_STORE = "assigned-cache";
@@ -103,7 +104,7 @@ export async function api<T>(
     headers.set("x-csrf-token", csrf);
   let response: Response;
   try {
-    response = await fetch("/api/v1" + path, {
+    response = await fetch(apiOrigin + "/v1" + path, {
       ...options,
       headers,
       credentials: "include",

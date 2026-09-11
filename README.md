@@ -126,6 +126,34 @@ future starts from resetting users, prices, stock or historical demo records.
 The production API image prunes development and migration tooling; Prisma CLI
 remains only in the migration image.
 
+## Vercel deployment
+
+Vercel can deploy the web application from the repository root with:
+
+```text
+Install command: npm ci
+Build command: npm run build
+Node.js version: 22
+```
+
+Set `NEXT_PUBLIC_API_URL` in the Vercel project environment to the reachable
+API origin, for example `https://api.example.rw`. The default `/api` value is
+for the local Vite proxy or a same-origin reverse proxy; it is not an API
+deployment by itself.
+
+For a separate API origin, configure the API with:
+
+```text
+WEB_ORIGIN=https://app.example.rw
+COOKIE_SECURE=true
+COOKIE_SAMESITE=none
+```
+
+The API must be deployed as a reachable NestJS service with PostgreSQL and
+Redis access. Deploying the frontend and database to Vercel does not run the
+NestJS API automatically. A same-origin reverse proxy is preferred because it
+avoids cross-site session-cookie behavior.
+
 ## Authentication troubleshooting
 
 - Before login, `GET /api/v1/auth/me` should return `401`, not `404`. A `401`

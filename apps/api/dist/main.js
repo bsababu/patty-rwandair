@@ -36,6 +36,12 @@ redis.on("error", () => {
 });
 const SESSION_SECONDS = 8 * 60 * 60;
 const secureCookie = () => process.env.COOKIE_SECURE === "true";
+const sameSiteCookie = () => {
+    const configured = process.env.COOKIE_SAMESITE;
+    if (configured === "none" && !secureCookie())
+        throw new Error("COOKIE_SAMESITE=none requires COOKIE_SECURE=true");
+    return configured === "none" || configured === "strict" ? configured : "lax";
+};
 async function authenticate(req, roles) {
     const sessionId = req.cookies?.wb_session;
     if (!sessionId)
@@ -344,14 +350,14 @@ let AppController = class AppController {
         await redis.set("session:" + sessionId, JSON.stringify({ user: safe, csrf, sessionVersion: user.sessionVersion }), "EX", SESSION_SECONDS);
         res.cookie("wb_session", sessionId, {
             httpOnly: true,
-            sameSite: "lax",
+            sameSite: sameSiteCookie(),
             secure: secureCookie(),
             maxAge: SESSION_SECONDS * 1000,
             path: "/",
         });
         res.cookie("wb_csrf", csrf, {
             httpOnly: false,
-            sameSite: "lax",
+            sameSite: sameSiteCookie(),
             secure: secureCookie(),
             maxAge: SESSION_SECONDS * 1000,
             path: "/",
@@ -2290,6 +2296,7 @@ AppModule = __decorate([
     (0, common_1.Module)({ controllers: [AppController] })
 ], AppModule);
 async function bootstrap() {
+    sameSiteCookie();
     await redis.connect().catch((e) => {
         if (String(e).includes("already connecting"))
             return;

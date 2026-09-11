@@ -1,8 +1,14 @@
 name: CI
 on: [push, pull_request]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -12,18 +18,25 @@ jobs:
       - run: npm run lint
   api:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults: {run: {working-directory: apps/api}}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: {node-version: 22}
-      - run: npm install
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - run: npm ci
       - run: npm run prisma:generate
       - run: npx prisma validate
+        env:
+          DATABASE_URL: postgresql://wingsbalance:ci-only@127.0.0.1:5432/wingsbalance
       - run: npm test
       - run: npm run build
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - run: cp .env.example .env
