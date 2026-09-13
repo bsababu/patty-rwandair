@@ -29,6 +29,7 @@ const domain_1 = require("./domain");
 const imports_1 = require("./imports");
 const prisma = new client_1.PrismaClient();
 const SESSION_SECONDS = 8 * 60 * 60;
+const databaseConfigured = () => Boolean(process.env.DATABASE_URL?.trim());
 const secureCookie = () => process.env.COOKIE_SECURE === "true";
 const sameSiteCookie = () => {
     const configured = process.env.COOKIE_SAMESITE;
@@ -286,10 +287,23 @@ let ApiExceptionFilter = class ApiExceptionFilter {
         const context = host.switchToHttp();
         const request = context.getRequest();
         const response = context.getResponse();
-        const status = exception instanceof common_1.HttpException ? exception.getStatus() : common_1.HttpStatus.INTERNAL_SERVER_ERROR;
+        const databaseConfigError = exception instanceof Error && exception.message.includes("DATABASE_URL");
+        const status = databaseConfigError
+            ? common_1.HttpStatus.SERVICE_UNAVAILABLE
+            : exception instanceof common_1.HttpException
+                ? exception.getStatus()
+                : common_1.HttpStatus.INTERNAL_SERVER_ERROR;
         const raw = exception instanceof common_1.HttpException ? exception.getResponse() : null;
         const details = typeof raw === "object" && raw ? raw : {};
-        const message = typeof raw === "string" ? raw : typeof details.message === "string" ? details.message : status === 500 ? "Internal server error" : "Request failed";
+        const message = databaseConfigError
+            ? "Database is not configured"
+            : typeof raw === "string"
+                ? raw
+                : typeof details.message === "string"
+                    ? details.message
+                    : status === 500
+                        ? "Internal server error"
+                        : "Request failed";
         const requestId = String(request.headers["x-request-id"] || (0, crypto_1.randomUUID)());
         if (status >= 500) {
             console.error("API request failed", {
@@ -314,6 +328,8 @@ let AppController = class AppController {
         };
     }
     async ready() {
+        if (!databaseConfigured())
+            throw new common_1.ServiceUnavailableException("DATABASE_URL is not configured");
         try {
             await prisma.$queryRaw `SELECT 1`;
             return { status: "ready", database: "connected" };
@@ -326,6 +342,8 @@ let AppController = class AppController {
         const email = body.email?.trim().toLowerCase();
         if (!email || !body.password)
             throw new common_1.UnauthorizedException("Invalid email or password");
+        if (!databaseConfigured())
+            throw new common_1.ServiceUnavailableException("DATABASE_URL is not configured");
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user ||
             !user.active ||

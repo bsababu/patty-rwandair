@@ -57,6 +57,7 @@ import {
 
 const prisma = new PrismaClient();
 const SESSION_SECONDS = 8 * 60 * 60;
+const databaseConfigured = () => Boolean(process.env.DATABASE_URL?.trim());
 type CurrentUser = { id: string; email: string; name: string; role: Role };
 type AuthedRequest = Request & {
   currentUser?: CurrentUser;
@@ -346,10 +347,23 @@ class ApiExceptionFilter implements ExceptionFilter {
     const context = host.switchToHttp();
     const request = context.getRequest<Request>();
     const response = context.getResponse<Response>();
-    const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+    const databaseConfigError = exception instanceof Error && exception.message.includes("DATABASE_URL");
+    const status = databaseConfigError
+      ? HttpStatus.SERVICE_UNAVAILABLE
+      : exception instanceof HttpException
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
     const raw = exception instanceof HttpException ? exception.getResponse() : null;
     const details = typeof raw === "object" && raw ? raw as Record<string, unknown> : {};
-    const message = typeof raw === "string" ? raw : typeof details.message === "string" ? details.message : status === 500 ? "Internal server error" : "Request failed";
+    const message = databaseConfigError
+      ? "Database is not configured"
+      : typeof raw === "string"
+        ? raw
+        : typeof details.message === "string"
+          ? details.message
+          : status === 500
+            ? "Internal server error"
+            : "Request failed";
     const requestId = String(request.headers["x-request-id"] || randomUUID());
     if (status >= 500) {
       console.error("API request failed", {
@@ -373,6 +387,8 @@ class AppController {
     };
   }
   @Get("ready") async ready() {
+    if (!databaseConfigured())
+      throw new ServiceUnavailableException("DATABASE_URL is not configured");
     try {
       await prisma.$queryRaw`SELECT 1`;
       return { status: "ready", database: "connected" };
@@ -389,6 +405,8 @@ class AppController {
     const email = body.email?.trim().toLowerCase();
     if (!email || !body.password)
       throw new UnauthorizedException("Invalid email or password");
+    if (!databaseConfigured())
+      throw new ServiceUnavailableException("DATABASE_URL is not configured");
     const user = await prisma.user.findUnique({ where: { email } });
     if (
       !user ||
