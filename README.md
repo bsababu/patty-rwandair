@@ -156,14 +156,19 @@ domain for defense-in-depth CORS.
 
 ### One-time migration and seed
 
-Vercel does not run the Compose `migrate` service. The GitHub Actions workflow
-`.github/workflows/production-migrate.yml` applies committed migrations on
+Vercel does not run the Compose `migrate` service. The consolidated GitHub
+Actions workflow `.github/workflows/ci.yml` applies committed migrations on
 pushes to `main` and can also be started manually. Configure a `DATABASE_URL`
-secret in the repository's protected `Production` environment. The workflow
-requires exactly that secret name and it must point to the same managed
-PostgreSQL database configured in Vercel. Do not create a second non-secret
+secret in the repository's protected `Production` environment. Its value must
+be the actual connection string copied from the managed database provider—not
+the documentation example containing `host`, `user:password`, or `/database`.
+The workflow requires exactly that secret name and it must point to the same
+managed PostgreSQL database configured in Vercel. Do not create a second non-secret
 repository/environment variable with the same name; the workflow reads the
-secret only.
+secret only. If the provider supplies separate pooled and direct URLs, add an
+optional `MIGRATION_DATABASE_URL` secret for GitHub Actions and keep the pooled
+`DATABASE_URL` for Vercel runtime traffic. The migration workflow uses the
+direct URL when present and otherwise falls back to `DATABASE_URL`.
 
 The migration workflow intentionally does not run the seed script. Seed only a
 new development/demo database explicitly:
@@ -206,8 +211,7 @@ COOKIE_SAMESITE=none
 ```
 
 Docker remains an optional self-hosted deployment and local dependency stack.
-It is validated separately from the required application CI because Vercel
-does not deploy the Compose web/API containers.
+It is not part of the Vercel production pipeline.
 
 ## Authentication troubleshooting
 

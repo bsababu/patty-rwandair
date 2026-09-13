@@ -1,5 +1,9 @@
-name: CI
-on: [push, pull_request]
+name: CI and deployment checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -49,3 +53,41 @@ jobs:
       - run: npm run prisma:migrate
       - run: npm test
       - run: npm run build
+
+  migrate:
+    name: Apply production Prisma migrations
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [web, api]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - name: Validate production database secret
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
+        run: |
+          test -n "$DATABASE_URL"
+          case "$DATABASE_URL" in
+            postgres://*|postgresql://*) ;;
+            *) echo "DATABASE_URL must be a PostgreSQL connection URL."; exit 1 ;;
+          esac
+          case "$DATABASE_URL" in
+            *localhost*|*127.0.0.1*|*@host:*|*user:password*|*/database*)
+              echo "DATABASE_URL still contains an example placeholder.";
+              exit 1
+              ;;
+          esac
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run prisma:migrate
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
