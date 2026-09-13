@@ -116,7 +116,7 @@ same-domain deployment. `vercel.json` configures this automatically:
 }
 ```
 
-[api/[...path].ts](api/[...path].ts) is a Vercel Serverless Function that
+[pages/api/[...path].ts](pages/api/[...path].ts) is the Next.js API route that
 loads the compiled `apps/api/dist/app.js` Nest application and serves every
 `/api/*` request on the same domain as the frontend, so `app/lib/api.ts`'s
 default `/api` base URL works with no `NEXT_PUBLIC_API_URL` configuration.
