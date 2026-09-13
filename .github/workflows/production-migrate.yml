@@ -17,7 +17,7 @@ jobs:
     name: Apply Prisma migrations
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: production
+    environment: Production
     defaults:
       run:
         working-directory: apps/api
@@ -30,10 +30,15 @@ jobs:
           cache-dependency-path: apps/api/package-lock.json
       - name: Require production database secret
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: test -n "$DATABASE_URL"
+          DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.PRODUCTION }}
+        run: |
+          test -n "$DATABASE_URL"
+          case "$DATABASE_URL" in
+            postgres://*|postgresql://*) ;;
+            *) echo "The production database secret must be a PostgreSQL connection URL."; exit 1 ;;
+          esac
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run prisma:migrate
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.PRODUCTION }}
