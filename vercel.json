@@ -5,7 +5,6 @@
   "buildCommand": "npm --prefix apps/api run prisma:generate && npm --prefix apps/api run build && npm run build",
   "functions": {
     "api/[...path].ts": {
-      "runtime": "nodejs22.x",
       "includeFiles": "apps/api/{dist,node_modules}/**"
     }
   }
