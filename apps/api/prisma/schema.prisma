@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 datasource db {
   provider = "postgresql"
@@ -74,6 +75,19 @@ model User {
   importBatches ImportBatch[]
   leadFlights Flight[] @relation("FlightLead")
   cateringLists CateringList[] @relation("CateringListOwner")
+  sessions Session[]
+}
+
+model Session {
+  id String @id
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  csrfToken String
+  expiresAt DateTime
+  lastSeenAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  @@index([userId])
+  @@index([expiresAt])
 }
 model Flight {
   id String @id @default(uuid())

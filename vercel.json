@@ -1,6 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
-  "installCommand": "npm ci",
-  "buildCommand": "npm run build"
+  "installCommand": "npm ci && npm --prefix apps/api ci",
+  "buildCommand": "npm --prefix apps/api run prisma:generate && npm --prefix apps/api run build && npm run build",
+  "functions": {
+    "api/[...path].ts": {
+      "includeFiles": "apps/api/{dist,node_modules}/**"
+    }
+  }
 }

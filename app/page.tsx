@@ -1073,17 +1073,12 @@ function Lead({
   const t = words[lang];
   const [flights, setFlights] = useState<Flight[]>([]);
   const [queue, setQueue] = useState<Approval[]>([]);
-  const [imports] = useState<ImportBatch[]>([]);
   const [attendants, setAttendants] = useState<UserOption[]>([]);
   const [cateringOptions, setCateringOptions] = useState<CateringOption[]>([]);
   const [crewDraft, setCrewDraft] = useState<Record<string, "PURSER" | "CABIN_CREW">>({});
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [importType, setImportType] = useState<ImportType>("FLIGHTS");
-  const [fileName, setFileName] = useState("");
-  const [csv, setCsv] = useState("");
-  const [preview, setPreview] = useState<ImportBatch | null>(null);
   const [selectedFlightId, setSelectedFlightId] = useState("");
   const [plan, setPlan] = useState<LeadLoadPlan | null>(null);
   const [crewStatus, setCrewStatus] = useState<CrewStatus | null>(null);
@@ -1250,92 +1245,6 @@ function Lead({
     } finally {
       setBusy(false);
     }
-  }
-
-  async function chooseFile(file?: File) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv")) {
-      setError("Choose a CSV file created from one of the supplied templates.");
-      return;
-    }
-    if (file.size > 1_000_000) {
-      setError("The CSV file exceeds the 1 MB pilot limit.");
-      return;
-    }
-    const source = await file.text();
-    if (!source.trim()) {
-      setError("The selected CSV file is empty.");
-      return;
-    }
-    setFileName(file.name);
-    setCsv(source);
-    setPreview(null);
-    setNotice("");
-    setError("");
-  }
-
-  async function previewImport() {
-    setBusy(true);
-    try {
-      setPreview(
-        await api<ImportBatch>("/imports/preview", {
-          method: "POST",
-          body: JSON.stringify({ type: importType, fileName, csv }),
-        }),
-      );
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Import preview failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function commitImport() {
-    if (!preview || preview.errorCount) return;
-    setBusy(true);
-    try {
-      const result = await api<Record<string, unknown>>(
-        `/imports/${preview.id}/commit`,
-        { method: "POST" },
-      );
-      setNotice(`Import committed: ${JSON.stringify(result)}`);
-      setPreview(null);
-      setCsv("");
-      setFileName("");
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Import commit failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function cancelImport() {
-    if (!preview) return;
-    setBusy(true);
-    try {
-      await api(`/imports/${preview.id}/cancel`, { method: "POST" });
-      setNotice("Import preview cancelled. No operational records were changed.");
-      setPreview(null);
-      setCsv("");
-      setFileName("");
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Import cancellation failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function downloadTemplate() {
-    const blob = new Blob([importTemplates[importType]], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `rwandair-${importType.toLowerCase()}-template.csv`;
-    anchor.click();
-    URL.revokeObjectURL(url);
   }
 
   function updatePlanLine(
@@ -2129,7 +2038,7 @@ export default function Home() {
           <div className="savings">
             <small>SECURE PILOT</small>
             <strong>{words[lang].demo}</strong>
-            <span>PostgreSQL · Redis · audited</span>
+            <span>PostgreSQL · audited</span>
           </div>
           <button onClick={logout}>⇥ {words[lang].signOut}</button>
         </div>

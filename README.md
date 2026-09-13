@@ -14,7 +14,8 @@ RwandAir internal catering operations and stock-control platform. The responsive
 ### Run locally with PostgreSQL in Docker
 
 Use this for local development when the web and API should run directly on the
-host. PostgreSQL remains in Docker; Redis is required locally on port `6379`.
+host. PostgreSQL remains in Docker; authentication sessions are stored in
+PostgreSQL, so no Redis service is required.
 
 1. Install dependencies:
 
@@ -37,12 +38,8 @@ host. PostgreSQL remains in Docker; Redis is required locally on port `6379`.
 
   ```bash
   test -f .env || cp .env.example .env
-  docker compose up -d postgres redis
+  docker compose up -d postgres
   ```
-
-Redis is exposed only on `127.0.0.1:6379` for host-local API development. If
-you already run Redis locally, stop it or change the local `REDIS_URL` and
-port mapping before starting Compose.
 
 4. Prepare the database:
 
@@ -77,12 +74,6 @@ Stop the Docker database with:
 docker compose stop postgres
 ```
 
-Stop the local Redis dependency with:
-
-```bash
-docker compose stop redis
-```
-
 ### Run the complete Docker stack
 
 1. Create the Docker environment file:
@@ -91,7 +82,7 @@ docker compose stop redis
    cp .env.example .env
    ```
 
-2. Replace the placeholder PostgreSQL, MinIO and session secrets in `.env`.
+2. Replace the placeholder PostgreSQL and MinIO secrets in `.env`.
    For local HTTP keep `WEB_ORIGIN=http://localhost` and
    `COOKIE_SECURE=false`. For a TLS deployment, terminate HTTPS in front of
    this Compose stack, use the real HTTPS origin and set `COOKIE_SECURE=true`.
@@ -119,8 +110,8 @@ Stop the stack without deleting persistent volumes:
 docker compose down
 ```
 
-The single Compose stack contains `web`, `api`, `migrate`, `postgres`, `redis`,
-`minio` and `nginx`. The one-shot migration service applies committed
+The single Compose stack contains `web`, `api`, `migrate`, `postgres`, `minio`
+and `nginx`. The one-shot migration service applies committed
 migrations and runs the seed before the API starts. A database marker prevents
 future starts from resetting users, prices, stock or historical demo records.
 The production API image prunes development and migration tooling; Prisma CLI
@@ -128,31 +119,78 @@ remains only in the migration image.
 
 ## Vercel deployment
 
-Vercel can deploy the web application from the repository root with:
+Vercel deploys the Next.js frontend **and** the NestJS API as a single
+same-domain deployment. `vercel.json` configures this automatically:
 
-```text
-Install command: npm ci
-Build command: npm run build
-Node.js version: 22
+```json
+{
+  "installCommand": "npm ci && npm --prefix apps/api ci",
+  "buildCommand": "npm --prefix apps/api run prisma:generate && npm --prefix apps/api run build && npm run build"
+}
 ```
 
-Set `NEXT_PUBLIC_API_URL` in the Vercel project environment to the reachable
-API origin, for example `https://api.example.rw`. The default `/api` value is
-for the local Next.js rewrite or a same-origin reverse proxy; it is not an API
-deployment by itself.
+[api/[...path].ts](api/[...path].ts) is a Vercel Serverless Function that
+loads the compiled `apps/api/dist/app.js` Nest application and serves every
+`/api/*` request on the same domain as the frontend, so `app/lib/api.ts`'s
+default `/api` base URL works with no `NEXT_PUBLIC_API_URL` configuration.
 
-For a separate API origin, configure the API with:
+### Required Vercel Environment Variables
 
-```text
+The API needs a **publicly reachable** PostgreSQL instance. Your local Docker
+Compose `postgres` container is not reachable from Vercel; use a managed
+provider such as Neon or Supabase, then set for Production (and Preview, if
+used):
+
+```env
+DATABASE_URL=postgresql://user:password@host:5432/wingsbalance?sslmode=require
+COOKIE_SECURE=true
+COOKIE_SAMESITE=lax
+DEMO_PASSWORD=<seed-only password>
+```
+
+`WEB_ORIGIN` is optional when same-origin, but set it to your production
+domain for defense-in-depth CORS.
+
+`DATABASE_URL` must be set **before the first build**, because
+`prisma generate` reads it while resolving the schema.
+
+### One-time migration and seed
+
+Vercel does not run the Compose `migrate` service. Before first use, run once
+from your machine against the managed database:
+
+```bash
+DATABASE_URL=<managed-postgres-url> npm --prefix apps/api run prisma:migrate
+DATABASE_URL=<managed-postgres-url> DEMO_PASSWORD=<seed-password> npm --prefix apps/api run seed
+```
+
+### Known risks of this deployment shape
+
+- `argon2` ships a native binary; it must load correctly under Vercel's
+  Node.js runtime. Verify a real login after the first deployment.
+- Prisma's query engine binary target for Vercel
+  (`rhel-openssl-3.0.x`, already added to `schema.prisma`) must match Vercel's
+  runtime; if Prisma reports a missing engine, check Vercel's function logs.
+- Serverless functions are stateless per invocation; PostgreSQL connections are
+  created lazily per cold start, which is expected but adds latency on the
+  first request after idle periods. Sessions are persisted in PostgreSQL.
+
+### Alternative: separate API origin
+
+If you would rather run the API on its own host (a VPS, Docker, or a managed
+Node host) instead of as a Vercel function, set:
+
+```env
+NEXT_PUBLIC_API_URL=https://api.example.rw
+```
+
+and on the API host:
+
+```env
 WEB_ORIGIN=https://app.example.rw
 COOKIE_SECURE=true
 COOKIE_SAMESITE=none
 ```
-
-The API must be deployed as a reachable NestJS service with PostgreSQL and
-Redis access. Deploying the frontend and database to Vercel does not run the
-NestJS API automatically. A same-origin reverse proxy is preferred because it
-avoids cross-site session-cookie behavior.
 
 Docker remains an optional self-hosted deployment and local dependency stack.
 It is validated separately from the required application CI because Vercel
@@ -184,7 +222,7 @@ does not deploy the Compose web/API containers.
   local launcher uses `.env.example` automatically and opens `.env.local` only
   after confirming it exists.
 - The dedicated local dependency ports avoid accidentally connecting to another
-  project's PostgreSQL, Redis or MinIO containers on their default ports.
+  project's PostgreSQL or MinIO containers on their default ports.
 
 Development demo accounts are `attendant@wings.rw`, `lead@wings.rw`,
 `procurement@wings.rw`, `director@wings.rw` and `admin@wings.rw`. Their seeded
@@ -214,7 +252,9 @@ tracking on newly imported flights.
   is not exposed in the Procurement workflow.
 - Director: reads aggregate financial KPIs, savings opportunities and explainable insights.
 
-Accounts are stored in PostgreSQL with Argon2 hashes. Opaque sessions and login throttles live in Redis; state-changing requests require the session CSRF token. Set `COOKIE_SECURE=true` behind production HTTPS.
+Accounts, opaque sessions, and login throttling are stored in PostgreSQL with
+Argon2 password hashes; state-changing requests require the session CSRF token.
+Set `COOKIE_SECURE=true` behind production HTTPS.
 
 ### Crew reporting workflow
 
