@@ -454,6 +454,41 @@ let AppController = class AppController {
         await audit(actor.id, "PASSWORD_ADMIN_RESET", "User", id);
         return { ok: true };
     }
+    async createUser(body, req) {
+        const actor = await authorizeMutation(req, [client_1.Role.ADMIN]);
+        const email = body.email?.trim().toLowerCase();
+        const name = body.name?.trim();
+        const role = body.role;
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+            throw new common_1.BadRequestException("A valid email is required");
+        if (!name || name.length < 2)
+            throw new common_1.BadRequestException("Name must contain at least 2 characters");
+        if (!role || !Object.values(client_1.Role).includes(role))
+            throw new common_1.BadRequestException("A valid user role is required");
+        if (!body.temporaryPassword || body.temporaryPassword.length < 10)
+            throw new common_1.BadRequestException("Temporary password must contain at least 10 characters");
+        const existing = await prisma.user.findUnique({ where: { email } });
+        if (existing)
+            throw new common_1.ConflictException("A user with this email already exists");
+        const user = await prisma.user.create({
+            data: {
+                email,
+                name,
+                role,
+                passwordHash: await (0, argon2_1.hash)(body.temporaryPassword),
+            },
+            select: {
+                id: true,
+                email: true,
+                name: true,
+                role: true,
+                active: true,
+                passwordChangedAt: true,
+            },
+        });
+        await audit(actor.id, "USER_CREATED", "User", user.id, { email, role });
+        return user;
+    }
     async navigation(req) {
         const user = await authenticate(req);
         const items = {
@@ -2027,6 +2062,14 @@ __decorate([
     __metadata("design:paramtypes", [String, Object, Object]),
     __metadata("design:returntype", Promise)
 ], AppController.prototype, "resetPassword", null);
+__decorate([
+    (0, common_1.Post)("v1/admin/users"),
+    __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Req)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, Object]),
+    __metadata("design:returntype", Promise)
+], AppController.prototype, "createUser", null);
 __decorate([
     (0, common_1.Get)("v1/navigation"),
     __param(0, (0, common_1.Req)()),

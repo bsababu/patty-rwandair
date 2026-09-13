@@ -11,7 +11,9 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:migrate:local": "node scripts/run-local.mjs ./node_modules/prisma/build/index.js migrate deploy",
     "seed": "tsx prisma/seed.ts",
-    "seed:local": "node scripts/run-local.mjs --import tsx prisma/seed.ts"
+    "seed:local": "node scripts/run-local.mjs --import tsx prisma/seed.ts",
+    "admin:reset": "tsx scripts/reset-admin.ts",
+    "admin:reset:local": "node scripts/run-local.mjs --import tsx scripts/reset-admin.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.0",

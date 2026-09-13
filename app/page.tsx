@@ -1887,6 +1887,7 @@ function Director({ lang, active }: { lang: "EN" | "FR"; active: string }) {
 
 function Admin() {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [newUser, setNewUser] = useState({ email: "", name: "", role: "ATTENDANT" as Role, temporaryPassword: "" });
   const [events, setEvents] = useState<
     Array<{
       id: string;
@@ -1924,6 +1925,21 @@ function Admin() {
       setError(e instanceof Error ? e.message : "Password reset failed");
     }
   }
+  async function createUser(event: React.FormEvent) {
+    event.preventDefault();
+    try {
+      const created = await api<AdminUser>("/admin/users", {
+        method: "POST",
+        body: JSON.stringify(newUser),
+      });
+      setUsers((current) => [...current, created].sort((left, right) => left.name.localeCompare(right.name)));
+      setNewUser({ email: "", name: "", role: "ATTENDANT", temporaryPassword: "" });
+      setNotice(`Created ${created.name} as ${created.role}.`);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "User creation failed");
+    }
+  }
   return (
     <>
       {error && <div className="error-box">{error}</div>}
@@ -1935,6 +1951,13 @@ function Admin() {
       />
       <section className="card">
         <div className="card-head"><div><small>ACCESS CONTROL</small><h2>Staff accounts</h2></div><span className="badge">{users.length}</span></div>
+        <form className="two-col" onSubmit={createUser}>
+          <label>Name<input required value={newUser.name} onChange={(event) => setNewUser({ ...newUser, name: event.target.value })} /></label>
+          <label>Work email<input required type="email" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} /></label>
+          <label>Role<select value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value as Role })}>{(["ATTENDANT", "LEAD", "PROCUREMENT", "DIRECTOR"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
+          <label>Temporary password<input required minLength={10} type="password" value={newUser.temporaryPassword} onChange={(event) => setNewUser({ ...newUser, temporaryPassword: event.target.value })} /></label>
+          <button className="primary" type="submit">Create user</button>
+        </form>
         {users.map((user) => (
           <article className="approval" key={user.id}>
             <div><b>{user.name}</b><span>{user.email} · {user.role} · {user.active ? "Active" : "Inactive"}</span><small>Password changed {new Date(user.passwordChangedAt).toLocaleDateString()}</small></div>
