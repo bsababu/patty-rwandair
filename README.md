@@ -156,13 +156,23 @@ domain for defense-in-depth CORS.
 
 ### One-time migration and seed
 
-Vercel does not run the Compose `migrate` service. Before first use, run once
-from your machine against the managed database:
+Vercel does not run the Compose `migrate` service. The GitHub Actions workflow
+`.github/workflows/production-migrate.yml` applies committed migrations on
+pushes to `main` and can also be started manually. Configure a `DATABASE_URL`
+secret in the repository's protected `production` environment. It must point
+to the same managed PostgreSQL database configured in Vercel.
+
+The migration workflow intentionally does not run the seed script. Seed only a
+new development/demo database explicitly:
 
 ```bash
 DATABASE_URL=<managed-postgres-url> npm --prefix apps/api run prisma:migrate
 DATABASE_URL=<managed-postgres-url> DEMO_PASSWORD=<seed-password> npm --prefix apps/api run seed
 ```
+
+The regular CI workflow starts PostgreSQL 17, applies all committed migrations,
+and then runs API tests. This catches migration drift before a change reaches
+the production migration workflow.
 
 ### Known risks of this deployment shape
 
