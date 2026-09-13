@@ -4,8 +4,11 @@
   "installCommand": "npm ci && npm --prefix apps/api ci",
   "buildCommand": "npm --prefix apps/api run prisma:generate && npm --prefix apps/api run build && npm run build",
   "functions": {
-    "api/**/*.ts": {
-      "includeFiles": "apps/api/{dist,node_modules}/**"
+    "api/[...path].ts": {
+      "includeFiles": "apps/api/**"
+    },
+    "api/v1/[...path].ts": {
+      "includeFiles": "apps/api/**"
     }
   }
 }
