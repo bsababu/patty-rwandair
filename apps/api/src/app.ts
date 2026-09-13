@@ -350,7 +350,16 @@ class ApiExceptionFilter implements ExceptionFilter {
     const raw = exception instanceof HttpException ? exception.getResponse() : null;
     const details = typeof raw === "object" && raw ? raw as Record<string, unknown> : {};
     const message = typeof raw === "string" ? raw : typeof details.message === "string" ? details.message : status === 500 ? "Internal server error" : "Request failed";
-    response.status(status).json({code: details.code || "HTTP_" + status,message,fieldErrors: details.fieldErrors,conflict: details.conflict,requestId: request.headers["x-request-id"] || randomUUID()});
+    const requestId = String(request.headers["x-request-id"] || randomUUID());
+    if (status >= 500) {
+      console.error("API request failed", {
+        requestId,
+        method: request.method,
+        path: request.originalUrl || request.url,
+        error: exception instanceof Error ? exception.message : String(exception),
+      });
+    }
+    response.status(status).json({code: details.code || "HTTP_" + status,message,fieldErrors: details.fieldErrors,conflict: details.conflict,requestId});
   }
 }
 

@@ -290,7 +290,16 @@ let ApiExceptionFilter = class ApiExceptionFilter {
         const raw = exception instanceof common_1.HttpException ? exception.getResponse() : null;
         const details = typeof raw === "object" && raw ? raw : {};
         const message = typeof raw === "string" ? raw : typeof details.message === "string" ? details.message : status === 500 ? "Internal server error" : "Request failed";
-        response.status(status).json({ code: details.code || "HTTP_" + status, message, fieldErrors: details.fieldErrors, conflict: details.conflict, requestId: request.headers["x-request-id"] || (0, crypto_1.randomUUID)() });
+        const requestId = String(request.headers["x-request-id"] || (0, crypto_1.randomUUID)());
+        if (status >= 500) {
+            console.error("API request failed", {
+                requestId,
+                method: request.method,
+                path: request.originalUrl || request.url,
+                error: exception instanceof Error ? exception.message : String(exception),
+            });
+        }
+        response.status(status).json({ code: details.code || "HTTP_" + status, message, fieldErrors: details.fieldErrors, conflict: details.conflict, requestId });
     }
 };
 ApiExceptionFilter = __decorate([
