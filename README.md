@@ -160,9 +160,10 @@ Vercel does not run the Compose `migrate` service. The GitHub Actions workflow
 `.github/workflows/production-migrate.yml` applies committed migrations on
 pushes to `main` and can also be started manually. Configure a `DATABASE_URL`
 secret in the repository's protected `Production` environment. The workflow
-also accepts the legacy secret name `PRODUCTION`, but `DATABASE_URL` is the
-recommended name. It must point to the same managed PostgreSQL database
-configured in Vercel.
+requires exactly that secret name and it must point to the same managed
+PostgreSQL database configured in Vercel. Do not create a second non-secret
+repository/environment variable with the same name; the workflow reads the
+secret only.
 
 The migration workflow intentionally does not run the seed script. Seed only a
 new development/demo database explicitly:

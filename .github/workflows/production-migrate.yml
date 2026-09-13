@@ -30,15 +30,18 @@ jobs:
           cache-dependency-path: apps/api/package-lock.json
       - name: Require production database secret
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.PRODUCTION }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           test -n "$DATABASE_URL"
           case "$DATABASE_URL" in
             postgres://*|postgresql://*) ;;
             *) echo "The production database secret must be a PostgreSQL connection URL."; exit 1 ;;
           esac
+          case "$DATABASE_URL" in
+            *localhost*|*127.0.0.1*) echo "Production DATABASE_URL cannot point to localhost."; exit 1 ;;
+          esac
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run prisma:migrate
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL || secrets.PRODUCTION }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
