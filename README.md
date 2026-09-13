@@ -56,12 +56,6 @@ PostgreSQL, so no Redis service is required.
   npm run dev
   ```
 
-Open `http://localhost:3001`. The API is available at
-`http://localhost:4000/health` and the web proxy at
-`http://localhost:3001/api/health`.
-
-The API `dev` command loads `apps/api/.env.example` and the optional ignored
-`apps/api/.env.local`. Keep both terminals running while using host-local mode:
 
 ```bash
 npm --prefix apps/api run dev
@@ -109,13 +103,6 @@ Stop the stack without deleting persistent volumes:
 ```bash
 docker compose down
 ```
-
-The single Compose stack contains `web`, `api`, `migrate`, `postgres`, `minio`
-and `nginx`. The one-shot migration service applies committed
-migrations and runs the seed before the API starts. A database marker prevents
-future starts from resetting users, prices, stock or historical demo records.
-The production API image prunes development and migration tooling; Prisma CLI
-remains only in the migration image.
 
 ## Vercel deployment
 
