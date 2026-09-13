@@ -6,7 +6,7 @@
   "functions": {
     "api/[...path].ts": {
       "runtime": "nodejs22.x",
-      "includeFiles": ["apps/api/dist/**", "apps/api/node_modules/**"]
+      "includeFiles": "apps/api/{dist,node_modules}/**"
     }
   }
 }
