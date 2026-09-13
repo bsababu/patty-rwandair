@@ -1,24 +1,19 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
+// The API build runs before the Next.js build (see vercel.json). A static
+// import is intentional: Vercel must be able to trace this module into the
+// serverless bundle.
+import { createApp } from "../apps/api/dist/app.js";
 
 type ExpressHandler = (req: IncomingMessage, res: ServerResponse) => void;
-
-const appEntryUrl = pathToFileURL(
-  path.join(process.cwd(), "apps/api/dist/app.js"),
-).href;
 
 let cachedHandler: ExpressHandler | null = null;
 
 async function getHandler(): Promise<ExpressHandler> {
   if (cachedHandler) return cachedHandler;
-  const { createApp } = (await import(appEntryUrl)) as {
-    createApp: () => Promise<{
-      getHttpAdapter: () => { getInstance: () => ExpressHandler };
-    }>;
-  };
   const app = await createApp();
-  cachedHandler = app.getHttpAdapter().getInstance();
+  cachedHandler = app
+    .getHttpAdapter()
+    .getInstance() as unknown as ExpressHandler;
   return cachedHandler;
 }
 
