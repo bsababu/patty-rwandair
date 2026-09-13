@@ -169,6 +169,12 @@ The regular CI workflow starts PostgreSQL 17, applies all committed migrations,
 and then runs API tests. This catches migration drift before a change reaches
 the production migration workflow.
 
+To recover or bootstrap the Production admin account, add an `ADMIN_PASSWORD`
+secret to the protected `Production` GitHub environment, then run the `CI and
+deployment checks` workflow manually with `operation=reset-admin`. Optionally
+set `ADMIN_EMAIL`; it defaults to `admin@wings.rw`. This operation targets the
+managed Production database and invalidates existing sessions for that admin.
+
 ### Known risks of this deployment shape
 
 - `argon2` ships a native binary; it must load correctly under Vercel's

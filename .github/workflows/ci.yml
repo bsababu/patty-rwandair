@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: "Production operation"
+        type: choice
+        options: [migrate, reset-admin]
+        default: migrate
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -59,7 +66,7 @@ jobs:
 
   migrate:
     name: Apply production Prisma migrations
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.operation == 'migrate') || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: [web, api]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -94,3 +101,36 @@ jobs:
       - run: npm run prisma:migrate
         env:
           DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
+
+  reset-admin:
+    name: Reset Production admin account
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'reset-admin' }}
+    needs: [web, api]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - name: Validate reset credentials
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          test -n "$DATABASE_URL"
+          test -n "$ADMIN_PASSWORD"
+          test "${#ADMIN_PASSWORD}" -ge 10
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run admin:reset
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || 'admin@wings.rw' }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}

@@ -1885,8 +1885,12 @@ function Director({ lang, active }: { lang: "EN" | "FR"; active: string }) {
   );
 }
 
-function Admin() {
+function Admin({ active }: { active: string }) {
   const [users, setUsers] = useState<AdminUser[]>([]);
+  const [userQuery, setUserQuery] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"ALL" | Role>("ALL");
+  const [auditQuery, setAuditQuery] = useState("");
+  const [auditFilter, setAuditFilter] = useState("ALL");
   const [newUser, setNewUser] = useState({ email: "", name: "", role: "ATTENDANT" as Role, temporaryPassword: "" });
   const [events, setEvents] = useState<
     Array<{
@@ -1906,6 +1910,16 @@ function Admin() {
         setEvents(auditRows);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Admin data failed to load"));
+  }, []);
+  useEffect(() => {
+    const focusAuditSearch = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('[aria-label="Search audit activity"]')?.focus();
+      }
+    };
+    window.addEventListener("keydown", focusAuditSearch);
+    return () => window.removeEventListener("keydown", focusAuditSearch);
   }, []);
   async function resetPassword(user: AdminUser) {
     const temporaryPassword = window.prompt(`Temporary password for ${user.name}`)?.trim();
@@ -1940,43 +1954,71 @@ function Admin() {
       setError(e instanceof Error ? e.message : "User creation failed");
     }
   }
+  const visibleUsers = users.filter((user) => {
+    const matchesQuery = `${user.name} ${user.email}`.toLowerCase().includes(userQuery.toLowerCase());
+    return matchesQuery && (roleFilter === "ALL" || user.role === roleFilter);
+  });
+  const visibleEvents = events.filter((event) => {
+    const matchesQuery = `${event.action} ${event.entityType} ${event.entityId}`.toLowerCase().includes(auditQuery.toLowerCase());
+    return matchesQuery && (auditFilter === "ALL" || event.action.startsWith(auditFilter));
+  });
   return (
     <>
       {error && <div className="error-box">{error}</div>}
       {notice && <div className="success-box">{notice}</div>}
       <PageTitle
-        eyebrow="ADMINISTRATION"
-        title="Users and security audit"
-        text="Manage access recovery and review the latest immutable events."
+        eyebrow={active === "audit" ? "AUDIT TRAIL" : "ADMINISTRATION"}
+        title={active === "audit" ? "Security activity" : "Staff accounts"}
+        text={active === "audit" ? "Review access and operational events without leaving the workspace." : "Create roles, manage access recovery, and keep staff permissions current."}
       />
-      <section className="card">
-        <div className="card-head"><div><small>ACCESS CONTROL</small><h2>Staff accounts</h2></div><span className="badge">{users.length}</span></div>
-        <form className="two-col" onSubmit={createUser}>
-          <label>Name<input required value={newUser.name} onChange={(event) => setNewUser({ ...newUser, name: event.target.value })} /></label>
-          <label>Work email<input required type="email" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} /></label>
-          <label>Role<select value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value as Role })}>{(["ATTENDANT", "LEAD", "PROCUREMENT", "DIRECTOR"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
-          <label>Temporary password<input required minLength={10} type="password" value={newUser.temporaryPassword} onChange={(event) => setNewUser({ ...newUser, temporaryPassword: event.target.value })} /></label>
-          <button className="primary" type="submit">Create user</button>
-        </form>
-        {users.map((user) => (
-          <article className="approval" key={user.id}>
-            <div><b>{user.name}</b><span>{user.email} · {user.role} · {user.active ? "Active" : "Inactive"}</span><small>Password changed {new Date(user.passwordChangedAt).toLocaleDateString()}</small></div>
-            <button className="outline" disabled={!user.active} onClick={() => resetPassword(user)}>Reset password</button>
-          </article>
-        ))}
-      </section>
-      <PageTitle eyebrow="AUDIT TRAIL" title="Security audit" text="Latest authentication and operational events." />
-      <section className="card table">
-        {events.map((x) => (
-          <div className="tr" key={x.id}>
-            <span className="dot active" />
-            <b>{x.action}</b>
-            <span>{x.entityType}</span>
-            <span>{x.entityId.slice(0, 8)}</span>
-            <em>{new Date(x.createdAt).toLocaleString()}</em>
+      {active === "users" && <section className="card admin-directory">
+        <div className="card-head admin-card-heading"><div><small>ACCESS CONTROL</small><h2>Staff accounts</h2><p>Create roles, review access, and recover accounts.</p></div><span className="badge">{users.length} total</span></div>
+        <form className="admin-create" onSubmit={createUser}>
+          <div className="admin-create-heading"><div><b>Add a staff member</b><span>Issue a temporary password, then ask the user to change it after sign-in.</span></div><span className="admin-create-icon">+</span></div>
+          <div className="admin-form-grid">
+            <label>Name<input required placeholder="e.g. Aline Mukamana" value={newUser.name} onChange={(event) => setNewUser({ ...newUser, name: event.target.value })} /></label>
+            <label>Work email<input required type="email" placeholder="name@wings.rw" value={newUser.email} onChange={(event) => setNewUser({ ...newUser, email: event.target.value })} /></label>
+            <label>Role<select value={newUser.role} onChange={(event) => setNewUser({ ...newUser, role: event.target.value as Role })}>{(["ATTENDANT", "LEAD", "PROCUREMENT", "DIRECTOR"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
+            <label>Temporary password<input required minLength={10} type="password" placeholder="At least 10 characters" value={newUser.temporaryPassword} onChange={(event) => setNewUser({ ...newUser, temporaryPassword: event.target.value })} /></label>
           </div>
-        ))}
-      </section>
+          <div className="admin-form-footer"><span>Password is never shown again after creation.</span><button className="primary" type="submit">Create user</button></div>
+        </form>
+        <div className="admin-directory-toolbar"><label className="admin-search"><span>⌕</span><input aria-label="Search staff" placeholder="Search by name or email" value={userQuery} onChange={(event) => setUserQuery(event.target.value)} /></label><select aria-label="Filter by role" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value as "ALL" | Role)}><option value="ALL">All roles</option>{(["ATTENDANT", "LEAD", "PROCUREMENT", "DIRECTOR", "ADMIN"] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select></div>
+        <div className="admin-user-list">
+          {visibleUsers.length ? visibleUsers.map((user) => (
+            <article className="admin-user-row" key={user.id}>
+              <span className="admin-avatar">{user.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span>
+              <div className="admin-user-identity"><b>{user.name}</b><span>{user.email}</span></div>
+              <span className={`admin-role ${user.role.toLowerCase()}`}>{user.role}</span>
+              <span className="admin-status"><i />{user.active ? "Active" : "Inactive"}</span>
+              <span className="admin-password-date">Password changed {new Date(user.passwordChangedAt).toLocaleDateString()}</span>
+              <button className="outline" disabled={!user.active} onClick={() => resetPassword(user)}>Reset password</button>
+            </article>
+          )) : <div className="empty admin-empty">No staff match this search.</div>}
+        </div>
+      </section>}
+      {active === "audit" && <section className="card audit-console">
+        <div className="audit-console-header"><div><small>AUDIT TRAIL</small><h2>Security activity</h2><p>Recent access and operational events, newest first.</p></div><span className="badge">{events.length} loaded</span></div>
+        <div className="audit-toolbar">
+          <label className="audit-search-box"><span className="audit-search-icon">⌕</span><input aria-label="Search audit activity" placeholder="Search activity, records, or reference IDs" value={auditQuery} onChange={(event) => setAuditQuery(event.target.value)} />{auditQuery && <button type="button" aria-label="Clear audit search" onClick={() => setAuditQuery("")}>×</button>}<kbd>⌘ K</kbd></label>
+          <div className="audit-filter-pills" aria-label="Filter audit activity">
+            {[{ value: "ALL", label: "All" }, { value: "AUTH", label: "Authentication" }, { value: "USER", label: "Users" }, { value: "IMPORT", label: "Imports" }, { value: "REPORT", label: "Reports" }].map((filter) => <button type="button" key={filter.value} className={auditFilter === filter.value ? "active" : ""} onClick={() => setAuditFilter(filter.value)}>{filter.label}</button>)}
+          </div>
+        </div>
+        <div className="audit-scroll" role="log" aria-label="Security activity log">
+          <div className="audit-columns"><span>Activity</span><span>Record</span><span>Reference</span><span>Time</span></div>
+          {visibleEvents.length ? visibleEvents.map((x) => (
+            <div className="audit-row" key={x.id}>
+              <span className={`audit-event-icon ${x.action.startsWith("AUTH") ? "auth" : x.action.startsWith("USER") ? "user" : "ops"}`}>{x.action.startsWith("AUTH") ? "↗" : x.action.startsWith("USER") ? "＋" : "•"}</span>
+              <div className="audit-event-name"><b>{x.action.replaceAll("_", " ")}</b><span>{x.action.startsWith("AUTH") ? "Authentication" : "Operational activity"}</span></div>
+              <span className="audit-entity">{x.entityType}</span>
+              <code>{x.entityId.slice(0, 8)}</code>
+              <time>{new Date(x.createdAt).toLocaleString()}</time>
+            </div>
+          )) : <div className="empty admin-empty">No activity matches this filter.</div>}
+        </div>
+        <div className="audit-console-footer"><span>Showing {visibleEvents.length} of {events.length} loaded events</span><span>Scroll within the activity panel to review history</span></div>
+      </section>}
     </>
   );
 }
@@ -2114,7 +2156,7 @@ export default function Home() {
           ) : user.role === "DIRECTOR" ? (
             <Director lang={lang} active={current} />
           ) : (
-            <Admin />
+            <Admin active={current} />
           )}
         </div>
       </section>
