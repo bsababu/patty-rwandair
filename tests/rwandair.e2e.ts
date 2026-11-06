@@ -41,7 +41,10 @@ async function login(page: Page, account: { email: string }) {
 }
 
 async function logout(page: Page) {
-  await page.getByRole("button", { name: /sign out/i }).click();
+  const signOut = page.getByRole("button", { name: /sign out/i });
+  await expect(signOut).toHaveCount(1);
+  await expect(signOut).toBeVisible();
+  await signOut.click();
   await expect(page.locator('input[autocomplete="username"]')).toBeVisible();
 }
 
@@ -174,6 +177,7 @@ test.describe("RwandAir end-to-end catering workflow", () => {
     await expect(page.getByText(/Totals by sector, cabin and unit/i)).toBeVisible();
     await page.getByRole("button", { name: /forward to catering/i }).click();
 
+    await page.setViewportSize({ width: 1280, height: 900 });
     await logout(page);
     await login(page, accounts.catering);
     await page.getByRole("button", { name: /reconciliation/i }).click();
