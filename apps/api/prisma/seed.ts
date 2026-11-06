@@ -112,6 +112,7 @@ async function main() {
     create: {
       flightNumber: "WB 402",
       flightDate,
+      serviceDate: new Date("2026-08-30T00:00:00.000Z"),
       aircraft: "B737-800",
       status: FlightStatus.ACTIVE,
       leadId: users[1].id,
@@ -199,6 +200,7 @@ async function main() {
     create: {
       flightNumber: "WB 435",
       flightDate: editableDate,
+      serviceDate: new Date("2026-09-01T00:00:00.000Z"),
       aircraft: "B737-800",
       status: FlightStatus.ACTIVE,
       leadId: users[1].id,

@@ -17,13 +17,16 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Put,
   Req,
   Res,
   ServiceUnavailableException,
+  StreamableFile,
   UnauthorizedException,
 } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import {
   Cabin,
@@ -49,11 +52,14 @@ import {
 import {
   csvRecords,
   dateWindow,
+  isoCalendarDate,
+  parseIsoTimestamp,
   importHeaders,
   nonnegativeInteger,
   normalizeFlightNumber,
   type CsvRow,
 } from "./imports";
+import { renderReportPdf, serializeReportCsv, type ReportSnapshot } from "./reports";
 
 const prisma = new PrismaClient();
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -151,8 +157,28 @@ const publicUser = (u: CurrentUser) => ({
 });
 
 const MAX_IMPORT_BYTES = 1_000_000;
+const canonicalJson = (value: unknown): unknown => Array.isArray(value)
+  ? value.map(canonicalJson)
+  : value !== null && typeof value === "object"
+    ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, canonicalJson(entry)]))
+    : value;
+const requestHash = (payload: unknown) => createHash("sha256").update(JSON.stringify(canonicalJson(payload ?? null))).digest("hex");
+const scopedKey = (actorId: string, action: string, resourceId: string, operationId: string) => {
+  if (typeof operationId !== "string" || !operationId.trim() || operationId.length > 160)
+    throw new BadRequestException("A valid operation ID is required");
+  return createHash("sha256").update(`${actorId}|${action}|${resourceId}|${operationId}`).digest("hex");
+};
+async function lockFlight(tx: Prisma.TransactionClient, id: string) {
+  await tx.$queryRaw`SELECT "id" FROM "Flight" WHERE "id" = ${id} FOR UPDATE`;
+}
+const assertReplay = (duplicate: { requestHash: string | null; response: unknown } | null, hash: string) => {
+  if (!duplicate) return null;
+  if (duplicate.requestHash && duplicate.requestHash !== hash)
+    throw new ConflictException("Retry payload does not match the original request");
+  return duplicate.response;
+};
 
-async function validateImport(type: ImportType, sourceText: string) {
+async function validateImport(type: ImportType, sourceText: string, database: Prisma.TransactionClient = prisma) {
   if (type === ImportType.CREW)
     throw new BadRequestException("Crew CSV imports are not supported; assign crew from the Lead workspace");
   if (Buffer.byteLength(sourceText, "utf8") > MAX_IMPORT_BYTES)
@@ -177,7 +203,7 @@ async function validateImport(type: ImportType, sourceText: string) {
   >();
   async function cachedFlight(number: string, date: string) {
     const key = `${number}|${date}`;
-    if (!flightCache.has(key)) flightCache.set(key, await findFlight(number, date));
+    if (!flightCache.has(key)) flightCache.set(key, await findFlight(number, date, database));
     return flightCache.get(key) || null;
   }
 
@@ -193,18 +219,20 @@ async function validateImport(type: ImportType, sourceText: string) {
       const sequence = nonnegativeInteger(data.sector_sequence);
       const economyPax = nonnegativeInteger(data.economy_pax);
       const businessPax = nonnegativeInteger(data.business_pax);
-      const departure = new Date(data.departure_iso);
-      const arrival = new Date(data.arrival_iso);
+      const departure = parseIsoTimestamp(data.departure_iso);
+      const arrival = parseIsoTimestamp(data.arrival_iso);
       if (!data.aircraft.trim()) row.errors.push("Aircraft is required");
       if (!sequence || sequence < 1) row.errors.push("Invalid sector sequence");
       if (!/^[A-Z]{3}$/.test(data.origin.toUpperCase()))
         row.errors.push("Invalid origin airport code");
       if (!/^[A-Z]{3}$/.test(data.destination.toUpperCase()))
         row.errors.push("Invalid destination airport code");
-      if (Number.isNaN(departure.valueOf()) || Number.isNaN(arrival.valueOf()))
+      if (!departure || !arrival)
         row.errors.push("Invalid departure or arrival timestamp");
       else if (arrival <= departure)
         row.errors.push("Arrival must be after departure");
+      if (sequence === 1 && isoCalendarDate(data.departure_iso) !== data.flight_date)
+        row.errors.push(`departure_iso calendar date ${isoCalendarDate(data.departure_iso) || "(invalid)"} must match flight_date ${data.flight_date}`);
       if (economyPax === null || businessPax === null)
         row.errors.push("Passenger counts must be nonnegative integers");
       const duplicateKey = `${flightNumber}|${data.flight_date}|${sequence}`;
@@ -245,25 +273,26 @@ async function validateImport(type: ImportType, sourceText: string) {
         );
       if (flightNumber && window) {
         const flight = await cachedFlight(flightNumber, data.flight_date);
-        if (!flight) row.errors.push("Unknown flight and date");
+        if (!flight) row.errors.push(`Missing flight dependency: import ${flightNumber} for ${data.flight_date} first`);
         else {
           const sector = flight.sectors.find((item) => item.sequence === sequence);
           if (!sector) row.errors.push("Unknown sector sequence");
           else data.__sector_id = sector.id;
           if (flight.report && !canSubmitReport(flight.report.status))
             row.errors.push("Flight report is already locked");
+          if (flight.reportingStartedAt) row.errors.push("Catering is locked because purser reporting has started");
           data.__flight_id = flight.id;
         }
       }
       if (!itemCache.has(data.item_sku))
         itemCache.set(
           data.item_sku,
-          await prisma.catalogItem.findUnique({ where: { sku: data.item_sku } }),
+          await database.catalogItem.findUnique({ where: { sku: data.item_sku } }),
         );
       const item = itemCache.get(data.item_sku);
       if (!item?.active) row.errors.push("Unknown or inactive catering SKU");
       else data.__item_id = item.id;
-      const duplicateKey = `${data.__sector_id}|${cabin}|${data.item_sku}`;
+      const duplicateKey = `${flightNumber}|${data.flight_date}|${sequence}|${cabin}|${data.item_sku}`;
       if (seen.has(duplicateKey)) row.errors.push("Duplicate catering line in file");
       seen.add(duplicateKey);
     }
@@ -288,19 +317,25 @@ async function validateImport(type: ImportType, sourceText: string) {
           row.errors.push("Sector sequences must start at 1 without gaps");
         if (index && ordered[index - 1].data.destination !== row.data.origin)
           row.errors.push("Sector origin does not continue from the previous destination");
+        if (index) {
+          const previousArrival = parseIsoTimestamp(ordered[index - 1].data.arrival_iso);
+          const departure = parseIsoTimestamp(row.data.departure_iso);
+          if (previousArrival && departure && departure < previousArrival)
+            row.errors.push("Sector departure must be at or after the previous sector's arrival");
+        }
       });
     }
   }
   return rows;
 }
 
-async function findFlight(flightNumber: string, date: string) {
+async function findFlight(flightNumber: string, date: string, database: Prisma.TransactionClient = prisma) {
   const window = dateWindow(date);
   if (!window) return null;
-  const flights = await prisma.flight.findMany({
+  const flights = await database.flight.findMany({
     where: {
       flightNumber,
-      flightDate: { gte: window.start, lt: window.end },
+      serviceDate: window.start,
     },
     include: {
       sectors: true,
@@ -347,6 +382,108 @@ function publicImportRows(rows: CsvRow[]) {
   }));
 }
 
+function csvCell(value: unknown) {
+  const raw = value === null || value === undefined ? "" : String(value);
+  const text = /^[\s\u0000-\u001f]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+async function loadReportData(flightId: string, revision?: number): Promise<ReportSnapshot> {
+  const flight = await prisma.flight.findUnique({
+    where: { id: flightId },
+    include: {
+      sectors: { orderBy: { sequence: "asc" } },
+      assignments: { where: { duty: "PURSER" }, include: { user: { select: { id: true, name: true, email: true } } } },
+      manifests: {
+        include: {
+          sector: true,
+          lines: { include: { item: true } },
+        },
+      },
+      report: {
+        include: {
+          purser: { select: { id: true, name: true, email: true } },
+          lines: true,
+          revisions: { orderBy: { revision: "asc" } },
+          approvals: { include: { actor: { select: { name: true } } }, orderBy: { createdAt: "asc" } },
+        },
+      },
+    },
+  });
+  if (!flight) throw new NotFoundException("Flight not found");
+  const targetRevision = revision || flight.report?.version || 0;
+  if (revision !== undefined || (flight.report && !canSubmitReport(flight.report.status))) {
+    const snapshot = flight.report?.revisions.find((entry) => entry.revision === targetRevision);
+    if (!snapshot) throw new NotFoundException("Report revision not found");
+    const saved = snapshot.snapshot as unknown as ReportSnapshot;
+    const events = (flight.report?.approvals || []).filter((event) => event.revision === targetRevision).map((event) => ({
+      decision: event.decision, actorName: event.actorName, reason: event.reason || "", createdAt: event.createdAt.toISOString(),
+    }));
+    const history = [...saved.reviewHistory, ...events].filter((event, index, entries) => entries.findIndex((entry) => entry.decision === event.decision && entry.createdAt === event.createdAt && entry.actorName === event.actorName) === index);
+    return revision !== undefined ? { ...saved, reviewHistory: history } : {
+      ...saved,
+      status: flight.report!.status,
+      approvedAt: flight.report?.approvedAt?.toISOString() || null,
+      reviewHistory: history,
+    };
+  }
+  const lines = flight.manifests.flatMap((manifest) =>
+    manifest.lines.map((line) => {
+      const { consumed, returned, spoiled, discarded } = line;
+      const unexplained = line.loaded - consumed - returned - spoiled - discarded;
+      return {
+        manifestLineId: line.id,
+        sector: manifest.sector.sequence,
+        origin: manifest.sector.origin,
+        destination: manifest.sector.destination,
+        cabin: manifest.cabin,
+        sku: line.item.sku,
+        item: line.item.nameEn,
+        unit: line.item.unit,
+        loaded: line.loaded,
+        consumed,
+        returned,
+        spoiled,
+        discarded,
+        unexplained,
+        remarks: line.remarks ?? "",
+      };
+    }),
+  );
+  return {
+    id: flight.report?.id || null,
+    status: flight.report?.status || ReportStatus.DRAFT,
+    version: targetRevision,
+    notes: flight.report?.notes || "",
+    submittedAt: flight.report?.submittedAt?.toISOString() || null,
+    approvedAt: flight.report?.approvedAt?.toISOString() || null,
+    purser: flight.assignments[0]?.user || { id: null, name: "Unassigned", email: "" },
+    flight: {
+      id: flight.id,
+      flightNumber: flight.flightNumber,
+      serviceDate: flight.serviceDate.toISOString().slice(0, 10),
+      aircraft: flight.aircraft,
+      status: flight.status,
+      sectors: flight.sectors.map((sector) => ({
+        sequence: sector.sequence,
+        origin: sector.origin,
+        destination: sector.destination,
+        scheduledDeparture: sector.scheduledDeparture.toISOString(),
+        scheduledArrival: sector.scheduledArrival.toISOString(),
+        economyPax: sector.economyPax,
+        businessPax: sector.businessPax,
+      })),
+    },
+    lines,
+    reviewHistory: (flight.report?.approvals || []).map((event) => ({
+      decision: event.decision,
+      actorName: event.actorName,
+      reason: event.reason || "",
+      createdAt: event.createdAt.toISOString(),
+    })),
+  };
+}
+
 @Catch()
 class ApiExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
@@ -355,22 +492,28 @@ class ApiExceptionFilter implements ExceptionFilter {
     const response = context.getResponse<Response>();
     const databaseError = databaseConfigurationError();
     const databaseConfigError = Boolean(databaseError) || (exception instanceof Error && exception.message.includes("DATABASE_URL"));
-    const status = databaseConfigError
+    const schemaDrift = (exception instanceof Prisma.PrismaClientKnownRequestError && ["P2021", "P2022"].includes(exception.code))
+      || (exception instanceof Error && /column .* does not exist|relation .* does not exist/i.test(exception.message));
+    const databaseConflict = exception instanceof Prisma.PrismaClientKnownRequestError && ["P2002", "P2025", "P2034"].includes(exception.code);
+    const bodyTooLarge = typeof exception === "object" && exception !== null && "status" in exception && exception.status === 413;
+    const status = databaseConfigError || schemaDrift
       ? HttpStatus.SERVICE_UNAVAILABLE
+      : databaseConflict ? HttpStatus.CONFLICT
+      : bodyTooLarge ? HttpStatus.PAYLOAD_TOO_LARGE
       : exception instanceof HttpException
         ? exception.getStatus()
         : HttpStatus.INTERNAL_SERVER_ERROR;
     const raw = exception instanceof HttpException ? exception.getResponse() : null;
     const details = typeof raw === "object" && raw ? raw as Record<string, unknown> : {};
-    const message = databaseError || (databaseConfigError
-      ? "Database configuration is invalid"
-      : typeof raw === "string"
-        ? raw
-        : typeof details.message === "string"
-          ? details.message
-          : status === 500
-            ? "Internal server error"
-            : "Request failed");
+    let message = "Request failed";
+    if (databaseError) message = databaseError;
+    else if (schemaDrift) message = "Database schema is out of date. Run prisma migrate deploy against this database, then restart the API.";
+    else if (databaseConflict) message = "This record changed or already exists. Refresh and try again.";
+    else if (bodyTooLarge) message = "Request body exceeds the upload limit.";
+    else if (databaseConfigError) message = "Database configuration is invalid";
+    else if (typeof raw === "string") message = raw;
+    else if (typeof details.message === "string") message = details.message;
+    else if (status === 500) message = "Internal server error";
     const requestId = String(request.headers["x-request-id"] || randomUUID());
     if (status >= 500) {
       console.error("API request failed", {
@@ -385,7 +528,7 @@ class ApiExceptionFilter implements ExceptionFilter {
 }
 
 @Controller()
-class AppController {
+export class AppController {
   @Get("health") health() {
     return {
       status: "ok",
@@ -398,9 +541,10 @@ class AppController {
     if (databaseError) throw new ServiceUnavailableException(databaseError);
     try {
       await prisma.$queryRaw`SELECT 1`;
+      await prisma.$queryRaw`SELECT "serviceDate" FROM "Flight" LIMIT 0`;
       return { status: "ready", database: "connected" };
     } catch {
-      throw new ServiceUnavailableException("Dependencies unavailable");
+      throw new ServiceUnavailableException("Database schema is not ready. Run prisma migrate deploy against this database.");
     }
   }
 
@@ -587,11 +731,11 @@ class AppController {
     const user = await authenticate(req);
     const where =
       user.role === Role.ATTENDANT
-        ? { assignments: { some: { userId: user.id } } }
+        ? { assignments: { some: { userId: user.id, duty: "PURSER" } } }
         : user.role === Role.LEAD
           ? { leadId: user.id }
           : {};
-    return prisma.flight.findMany({
+    const flights = await prisma.flight.findMany({
       where,
       orderBy: { flightDate: "desc" },
       include: {
@@ -610,12 +754,36 @@ class AppController {
           user.role === Role.ATTENDANT
             ? false
             : {
+                where: { duty: "PURSER" },
                 include: {
                   user: { select: { id: true, name: true, email: true } },
                 },
               },
       },
     });
+    if (user.role === Role.ATTENDANT) {
+      const now = Date.now();
+      for (const flight of flights) {
+        if (flight.status === FlightStatus.CANCELLED || (flight.report && flight.report.status !== ReportStatus.DRAFT)) continue;
+        const arrivals = flight.sectors.map((sector) => sector.scheduledArrival.getTime()).filter(Number.isFinite);
+        if (!arrivals.length || Math.max(...arrivals) >= now) continue;
+        const recent = await prisma.notification.findFirst({
+          where: { userId: user.id, flightId: flight.id, kind: "LEFTOVERS_DUE", createdAt: { gte: new Date(now - 86_400_000) } },
+          select: { id: true },
+        });
+        if (!recent) await prisma.notification.create({
+          data: {
+            userId: user.id,
+            flightId: flight.id,
+            kind: "LEFTOVERS_DUE",
+            title: `${flight.flightNumber}: leftovers report due`,
+            body: "The final scheduled arrival has passed. Review quantities and prepare the consolidated leftovers report.",
+            actionPath: "my-flight",
+          },
+        });
+      }
+    }
+    return flights;
   }
   @Post("v1/flights") async createFlight(
     @Body() body: {flightNumber:string;flightDate:string;aircraft:string;origin:string;destination:string;scheduledArrival:string;economyPax:number;businessPax:number},
@@ -623,15 +791,15 @@ class AppController {
   ) {
     const actor=await authorizeMutation(req,[Role.PROCUREMENT]);
     const flightNumber = normalizeFlightNumber(body.flightNumber || "");
-    const departure = new Date(body.flightDate);
-    const arrival = new Date(body.scheduledArrival);
+    const departure = parseIsoTimestamp(body.flightDate || "");
+    const arrival = parseIsoTimestamp(body.scheduledArrival || "");
+    const serviceDate = dateWindow(isoCalendarDate(body.flightDate || "") || "")?.start;
     if(
       !flightNumber ||
       !body.aircraft?.trim() ||
       !/^[A-Z]{3}$/.test(body.origin?.toUpperCase()) ||
       !/^[A-Z]{3}$/.test(body.destination?.toUpperCase()) ||
-      Number.isNaN(departure.valueOf()) ||
-      Number.isNaN(arrival.valueOf()) ||
+      !departure || !arrival || !serviceDate ||
       arrival <= departure ||
       !Number.isInteger(body.economyPax) ||
       !Number.isInteger(body.businessPax) ||
@@ -641,11 +809,11 @@ class AppController {
     const duplicate = await prisma.flight.count({
       where: {
         flightNumber,
-        flightDate: { gte: new Date(departure.toISOString().slice(0, 10)), lt: new Date(new Date(departure.toISOString().slice(0, 10)).valueOf() + 86_400_000) },
+        serviceDate,
       },
     });
     if (duplicate) throw new ConflictException("Flight already exists for this date");
-    const flight=await prisma.flight.create({data:{flightNumber,flightDate:departure,aircraft:body.aircraft.trim().toUpperCase(),status:"SCHEDULED",sectors:{create:{sequence:1,origin:body.origin.toUpperCase(),destination:body.destination.toUpperCase(),scheduledDeparture:departure,scheduledArrival:arrival,economyPax:body.economyPax,businessPax:body.businessPax}}},include:{sectors:true}});
+    const flight=await prisma.flight.create({data:{flightNumber,flightDate:departure,serviceDate,aircraft:body.aircraft.trim().toUpperCase(),status:"SCHEDULED",sectors:{create:{sequence:1,origin:body.origin.toUpperCase(),destination:body.destination.toUpperCase(),scheduledDeparture:departure,scheduledArrival:arrival,economyPax:body.economyPax,businessPax:body.businessPax}}},include:{sectors:true}});
     await audit(actor.id,"FLIGHT_CREATED","Flight",flight.id);return flight;
   }
   @Get("v1/procurement/leads") async procurementLeads(
@@ -730,26 +898,32 @@ class AppController {
     body: {
       assignments?: Array<{ userId: string; duty: "PURSER" | "CABIN_CREW" }>;
       operationId?: string;
+      version: number;
     },
     @Req() req: AuthedRequest,
   ) {
     const actor = await authorizeMutation(req, [Role.LEAD]);
     const flight = await requireLeadFlight(actor.id, id);
+    const idemKey = scopedKey(actor.id, "PURSER_ASSIGN", id, body.operationId || "");
+    const idemHash = requestHash({ assignments: body.assignments, version: body.version });
+    const prior = assertReplay(await prisma.idempotencyKey.findUnique({ where: { key: idemKey } }), idemHash);
+    if (prior) return prior;
+    if (!Number.isInteger(body.version) || body.version !== flight.version)
+      throw new ConflictException({ code: "VERSION_CONFLICT", message: "Flight assignment changed on the server" });
     if (flight.report && !canSubmitReport(flight.report.status))
       throw new ConflictException("Crew is locked after report submission");
-    const startedReports = await prisma.crewSubmission.count({
+    const submittedReport = await prisma.flightReport.findUnique({
       where: { flightId: id },
+      select: { submittedAt: true },
     });
-    if (startedReports)
-      throw new ConflictException(
-        "Crew assignment is locked because crew reporting has started",
-      );
+    if (submittedReport?.submittedAt)
+      throw new ConflictException("Purser assignment is locked after first submission");
     const assignments = body.assignments || [];
     const userIds = assignments.map((item) => item.userId);
     if (new Set(userIds).size !== userIds.length)
       throw new BadRequestException("Each attendant may be assigned once");
-    if (assignments.length && assignments.filter((item) => item.duty === "PURSER").length !== 1)
-      throw new BadRequestException("Select exactly one purser");
+    if (assignments.length !== 1 || assignments[0].duty !== "PURSER")
+      throw new BadRequestException("Assign exactly one Flight Purser");
     const attendants = await prisma.user.findMany({
       where: { id: { in: userIds }, role: Role.ATTENDANT, active: true },
       select: { id: true },
@@ -761,6 +935,7 @@ class AppController {
       const existing = await prisma.crewAssignment.findMany({
         where: {
           userId: { in: userIds },
+          duty: "PURSER",
           flightId: { not: id },
           flight: { status: { in: ["SCHEDULED", "BOARDING", "ACTIVE"] } },
         },
@@ -775,22 +950,44 @@ class AppController {
           `${conflict.user.name} is already assigned to an overlapping flight`,
         );
     }
-    await prisma.$transaction(async (tx) => {
-      await tx.crewAssignment.deleteMany({ where: { flightId: id } });
-      if (assignments.length)
-        await tx.crewAssignment.createMany({
-          data: assignments.map((item) => ({ flightId: id, ...item })),
+    const result = await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, id);
+      await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userIds[0]} FOR UPDATE`;
+      const currentFlight = await tx.flight.findUnique({ where: { id }, select: { leadId: true, status: true, version: true } });
+      if (!currentFlight || currentFlight.leadId !== actor.id) throw new ForbiddenException("This flight is not assigned to Cabin Services");
+      if (currentFlight.status === FlightStatus.CANCELLED || currentFlight.version !== body.version) throw new ConflictException("Flight assignment changed or is cancelled");
+      const txReport = await tx.flightReport.findUnique({ where: { flightId: id }, select: { submittedAt: true } });
+      if (txReport?.submittedAt)
+        throw new ConflictException("Purser assignment is locked after first submission");
+      const available = await tx.user.findFirst({ where: { id: userIds[0], role: Role.ATTENDANT, active: true } });
+      if (!available) throw new ConflictException("Flight Purser is no longer available");
+      const otherAssignments = await tx.crewAssignment.findMany({ where: { userId: userIds[0], duty: "PURSER", flightId: { not: id }, flight: { status: { in: ["SCHEDULED", "BOARDING", "ACTIVE"] } } }, include: { flight: { include: { sectors: true } } } });
+      if (target && otherAssignments.some((entry) => { const bounds = scheduleBounds(entry.flight.sectors); return bounds ? schedulesOverlap(target, bounds) : false; }))
+        throw new ConflictException("This Flight Purser already has an overlapping flight");
+      await tx.crewAssignment.updateMany({
+        where: { flightId: id, duty: "PURSER" },
+        data: { duty: "FORMER_PURSER" },
+      });
+      for (const assignment of assignments)
+        await tx.crewAssignment.upsert({
+          where: { flightId_userId: { flightId: id, userId: assignment.userId } },
+          update: { duty: assignment.duty },
+          create: { flightId: id, userId: assignment.userId, duty: assignment.duty },
         });
-      await tx.flight.update({
-        where: { id },
+      const updated = await tx.flight.updateMany({
+        where: { id, version: body.version },
         data: { version: { increment: 1 } },
       });
+      if (updated.count !== 1) throw new ConflictException("Flight assignment changed on the server");
+      const response = { flightId: id, assignments, version: body.version + 1 };
+      await tx.idempotencyKey.create({ data: { key: idemKey, requestHash: idemHash, response, expiresAt: new Date(Date.now() + 7 * 86_400_000) } });
+      return response;
     });
     await audit(actor.id, "FLIGHT_CREW_ASSIGNED", "Flight", id, {
       assignments,
       operationId: body.operationId,
     });
-    return { flightId: id, assignments };
+    return result;
   }
   @Get("v1/lead/flights/:id/catering-options") async cateringOptions(
     @Param("id") id: string,
@@ -798,7 +995,7 @@ class AppController {
   ) {
     const actor = await authenticate(req, [Role.LEAD]);
     const flight = await requireLeadFlight(actor.id, id);
-    const serviceDate = new Date(`${flight.flightDate.toISOString().slice(0, 10)}T00:00:00.000Z`);
+    const serviceDate = flight.serviceDate;
     return prisma.cateringList.findMany({
       where: {
         flightNumber: flight.flightNumber,
@@ -820,14 +1017,21 @@ class AppController {
   ) {
     const actor = await authorizeMutation(req, [Role.LEAD]);
     if (!body.operationId) throw new BadRequestException("Operation ID is required");
+    const idemKey = scopedKey(actor.id, "CATERING_ATTACH", id, body.operationId);
+    const idemHash = requestHash({ listId });
     const duplicate = await prisma.idempotencyKey.findUnique({
-      where: { key: body.operationId },
+      where: { key: idemKey },
     });
-    if (duplicate) return duplicate.response;
+    const replay = assertReplay(duplicate, idemHash);
+    if (replay) return replay;
     const flight = await requireLeadFlight(actor.id, id);
     if (flight.report && flight.report.status !== ReportStatus.DRAFT)
       throw new ConflictException("Catering is locked after report submission");
-    if (await prisma.crewSubmission.count({ where: { flightId: id } }))
+    const reportingStarted = await prisma.flight.findUnique({
+      where: { id },
+      select: { reportingStartedAt: true },
+    });
+    if (reportingStarted?.reportingStartedAt)
       throw new ConflictException(
         "Catering is locked because crew reporting has started",
       );
@@ -843,7 +1047,7 @@ class AppController {
     });
     if (current?.cateringListId === list.id)
       return { flightId: id, cateringList: { id: list.id, name: list.name } };
-    const date = flight.flightDate.toISOString().slice(0, 10);
+    const date = flight.serviceDate.toISOString().slice(0, 10);
     if (
       list.flightNumber !== flight.flightNumber ||
       list.serviceDate.toISOString().slice(0, 10) !== date
@@ -855,6 +1059,13 @@ class AppController {
       if (!flight.sectors.some((sector) => sector.sequence === line.sectorSequence))
         throw new BadRequestException("Catering list contains an unknown sector");
     await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, id);
+      const txFlight = await tx.flight.findUnique({ where: { id }, select: { leadId: true, status: true, reportingStartedAt: true, report: { select: { status: true } } } });
+      if (!txFlight) throw new NotFoundException("Flight not found");
+      if (txFlight.leadId !== actor.id) throw new ForbiddenException("This flight is not assigned to Cabin Services");
+      if (txFlight.status === FlightStatus.CANCELLED) throw new ConflictException("Cancelled flights are read-only");
+      if (txFlight.reportingStartedAt || (txFlight.report && txFlight.report.status !== ReportStatus.DRAFT))
+        throw new ConflictException("Catering is locked after reporting starts");
       const manifests = await tx.manifest.findMany({ where: { flightId: id } });
       await tx.manifestLine.deleteMany({
         where: { manifestId: { in: manifests.map((item) => item.id) } },
@@ -900,7 +1111,8 @@ class AppController {
       };
       await tx.idempotencyKey.create({
         data: {
-          key: body.operationId!,
+          key: idemKey,
+          requestHash: idemHash,
           response,
           expiresAt: new Date(Date.now() + 30 * 86400000),
         },
@@ -937,6 +1149,27 @@ class AppController {
       },
     });
   }
+  @Get("v1/imports/:id/errors.csv") async importErrorsCsv(
+    @Param("id") id: string,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const actor = await authenticate(req, [Role.PROCUREMENT]);
+    const batch = await prisma.importBatch.findFirst({
+      where: { id, actorId: actor.id },
+      select: { fileName: true, rows: true },
+    });
+    if (!batch) throw new NotFoundException("Import batch not found");
+    const rows = Array.isArray(batch.rows) ? batch.rows as Array<{ row: number; data: Record<string, unknown>; errors: string[] }> : [];
+    const output = ["row,errors,data", ...rows.filter((row) => row.errors.length).map((row) => [
+      row.row,
+      row.errors.join("; "),
+      JSON.stringify(row.data),
+    ].map(csvCell).join(","))].join("\n") + "\n";
+    response.setHeader("Content-Type", "text/csv; charset=utf-8");
+    response.setHeader("Content-Disposition", `attachment; filename="${batch.fileName.replace(/[^A-Za-z0-9_.-]+/g, "-")}-errors.csv"`);
+    return output;
+  }
   @Post("v1/imports/preview") async previewImport(
     @Body() body: { type?: ImportType; fileName?: string; csv?: string },
     @Req() req: AuthedRequest,
@@ -969,7 +1202,26 @@ class AppController {
         createdAt: true,
       },
     });
-    if (existing) return existing;
+    if (existing) {
+      return prisma.importBatch.update({
+        where: { id: existing.id },
+        data: {
+          rows: publicImportRows(rows) as unknown as Prisma.InputJsonValue,
+          rowCount: rows.length,
+          errorCount,
+        },
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          fileName: true,
+          rows: true,
+          rowCount: true,
+          errorCount: true,
+          createdAt: true,
+        },
+      });
+    }
     const batch = await prisma.importBatch.create({
       data: {
         type: body.type,
@@ -1013,7 +1265,7 @@ class AppController {
     if (batch.status === ImportStatus.COMMITTED) return batch.result;
     if (batch.status !== ImportStatus.PREVIEWED)
       throw new ConflictException("Import is no longer available to commit");
-    const rows = await validateImport(batch.type, batch.sourceText);
+    let rows = await validateImport(batch.type, batch.sourceText);
     const invalid = rows.filter((row) => row.errors.length);
     if (invalid.length)
       throw new ConflictException({
@@ -1025,6 +1277,14 @@ class AppController {
       });
 
     const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "ImportBatch" WHERE "id" = ${id} FOR UPDATE`;
+      const currentBatch = await tx.importBatch.findUniqueOrThrow({ where: { id } });
+      if (currentBatch.status === ImportStatus.COMMITTED) return currentBatch.result;
+      for (const flightId of [...new Set(rows.map((row) => row.data.__flight_id).filter(Boolean))].sort()) await lockFlight(tx, flightId);
+      const validatedRows = await validateImport(batch.type, batch.sourceText, tx);
+      const failures = validatedRows.filter((row) => row.errors.length);
+      if (failures.length) throw new ConflictException({ code: "IMPORT_REVALIDATION_FAILED", message: "Import dependencies changed; preview the file again", fieldErrors: Object.fromEntries(failures.map((row) => [`row_${row.row}`, row.errors])) });
+      rows = validatedRows;
       const claimed = await tx.importBatch.updateMany({
         where: { id, status: ImportStatus.PREVIEWED },
         data: { status: ImportStatus.COMMITTED },
@@ -1061,6 +1321,7 @@ class AppController {
             data: {
               flightNumber: first.flight_number,
               flightDate: new Date(first.departure_iso),
+              serviceDate: new Date(`${first.flight_date}T00:00:00.000Z`),
               aircraft: first.aircraft,
               status: "SCHEDULED",
               sectors: {
@@ -1135,25 +1396,7 @@ class AppController {
           ids,
         });
       }
-      let assignments = 0;
-      for (const { data } of rows) {
-        await tx.crewAssignment.upsert({
-          where: {
-            flightId_userId: {
-              flightId: data.__flight_id,
-              userId: data.__user_id,
-            },
-          },
-          update: { duty: data.duty },
-          create: {
-            flightId: data.__flight_id,
-            userId: data.__user_id,
-            duty: data.duty,
-          },
-        });
-        assignments += 1;
-      }
-      return finish({ assignments });
+      throw new BadRequestException("Unsupported import type");
     });
     await audit(actor.id, "IMPORT_COMMITTED", "ImportBatch", id, {
       type: batch.type,
@@ -1191,14 +1434,15 @@ class AppController {
     @Param("id") id: string,
     @Req() req: AuthedRequest,
   ) {
-    const user = await authenticate(req);
+    const user = await authenticate(req, [Role.ATTENDANT, Role.LEAD, Role.PROCUREMENT, Role.ADMIN]);
+    if (user.role === Role.LEAD) await requireLeadFlight(user.id, id);
     let crewDuty: string | null = null;
     if (user.role === Role.ATTENDANT) {
       const assigned = await prisma.crewAssignment.findUnique({
         where: { flightId_userId: { flightId: id, userId: user.id } },
         select: { duty: true },
       });
-      if (!assigned) throw new ForbiddenException("Flight not assigned");
+      if (!assigned || assigned.duty !== "PURSER") throw new ForbiddenException("Flight not assigned to this Flight Purser");
       crewDuty = assigned.duty;
     }
     const flight = await prisma.flight.findUnique({
@@ -1228,37 +1472,9 @@ class AppController {
       },
     });
     if (!flight) throw new NotFoundException("Flight not found");
-    const [crewSubmission, assignments, submittedCount] =
-      user.role === Role.ATTENDANT
-        ? await Promise.all([
-            prisma.crewSubmission.findUnique({
-              where: { flightId_userId: { flightId: id, userId: user.id } },
-            }),
-            prisma.crewAssignment.findMany({
-              where: { flightId: id },
-              select: {
-                id: true,
-                duty: true,
-                user: { select: { id: true, name: true } },
-              },
-              orderBy: { user: { name: "asc" } },
-            }),
-            prisma.crewSubmission.count({ where: { flightId: id } }),
-          ])
-        : [null, [], 0];
     return {
       ...flight,
       crewDuty,
-      crewSubmission,
-      crew: assignments.map((assignment) => ({
-        id: assignment.id,
-        name: assignment.user.name,
-        duty: assignment.duty,
-        submitted: assignment.user.id === user.id
-          ? Boolean(crewSubmission)
-          : false,
-      })),
-      crewProgress: { assigned: assignments.length, submitted: submittedCount },
     };
   }
   @Get("v1/lead/flights/:id/load-plan") async leadLoadPlan(
@@ -1295,14 +1511,13 @@ class AppController {
       },
     });
     if (!flight) throw new NotFoundException("Flight not found");
-    const [forecasts, crewSubmissionCount] = await Promise.all([
+    const [forecasts] = await Promise.all([
       prisma.forecast.findMany({
         where: { flightId: id },
         orderBy: { createdAt: "desc" },
       }),
-      prisma.crewSubmission.count({ where: { flightId: id } }),
     ]);
-    return { flight, forecasts, crewSubmissionCount };
+    return { flight, forecasts, crewSubmissionCount: flight.reportingStartedAt ? 1 : 0 };
   }
   @Get("v1/lead/flights/:id/crew-status") async leadCrewStatus(
     @Param("id") id: string,
@@ -1310,24 +1525,26 @@ class AppController {
   ) {
     const actor = await authenticate(req, [Role.LEAD]);
     const flight = await requireLeadFlight(actor.id, id);
-    const [assignments, submissions] = await Promise.all([
+    const [assignments, report] = await Promise.all([
       prisma.crewAssignment.findMany({
-        where: { flightId: id },
+        where: { flightId: id, duty: "PURSER" },
         include: { user: { select: { id: true, name: true, email: true } } },
         orderBy: [{ duty: "desc" }, { user: { name: "asc" } }],
       }),
-      prisma.crewSubmission.findMany({ where: { flightId: id } }),
+      prisma.flightReport.findUnique({
+        where: { flightId: id },
+        select: { status: true, purserId: true, submittedAt: true, notes: true },
+      }),
     ]);
-    const byUser = new Map(submissions.map((item) => [item.userId, item]));
     const crew = assignments.map((assignment) => {
-      const submission = byUser.get(assignment.userId);
+      const submitted = report?.purserId === assignment.userId && report.status !== ReportStatus.DRAFT;
       return {
         assignmentId: assignment.id,
         user: assignment.user,
         duty: assignment.duty,
-        status: submission ? "SUBMITTED" : "PENDING",
-        submittedAt: submission?.submittedAt || null,
-        notes: submission?.notes || null,
+        status: submitted ? "SUBMITTED" : "PENDING",
+        submittedAt: submitted ? report?.submittedAt || null : null,
+        notes: submitted ? report?.notes || null : null,
       };
     });
     return {
@@ -1356,11 +1573,12 @@ class AppController {
       include: { user: { select: { name: true } } },
     });
     if (!assignment) throw new NotFoundException("Crew assignment not found");
-    const submitted = await prisma.crewSubmission.count({
-      where: { flightId: id, userId },
+    const report = await prisma.flightReport.findUnique({
+      where: { flightId: id },
+      select: { purserId: true, status: true },
     });
-    if (submitted)
-      throw new ConflictException("This attendant has already reported");
+    if (report?.purserId === userId && report.status !== ReportStatus.DRAFT)
+      throw new ConflictException("This Flight Purser has already reported");
     await prisma.notification.create({
       data: {
         userId,
@@ -1394,10 +1612,13 @@ class AppController {
   ) {
     const actor = await authorizeMutation(req, [Role.LEAD]);
     if (!body.operationId) throw new BadRequestException("Operation ID is required");
+    const idemKey = scopedKey(actor.id, "LOAD_SAVE", id, body.operationId);
+    const idemHash = requestHash({ version: body.version, lines: body.lines });
     const duplicate = await prisma.idempotencyKey.findUnique({
-      where: { key: body.operationId },
+      where: { key: idemKey },
     });
-    if (duplicate) return duplicate.response;
+    const replay = assertReplay(duplicate, idemHash);
+    if (replay) return replay;
     const manifest = await prisma.manifest.findUnique({
       where: { id },
       include: {
@@ -1408,10 +1629,11 @@ class AppController {
     if (!manifest) throw new NotFoundException("Manifest not found");
     if (manifest.flight.leadId !== actor.id)
       throw new ForbiddenException("This flight is not assigned to the Lead");
-    const crewSubmissionCount = await prisma.crewSubmission.count({
-      where: { flightId: manifest.flightId },
+    const reportingStarted = await prisma.flight.findUnique({
+      where: { id: manifest.flightId },
+      select: { reportingStartedAt: true },
     });
-    if (crewSubmissionCount)
+    if (reportingStarted?.reportingStartedAt)
       throw new ConflictException(
         "The catering load is locked because crew reporting has started",
       );
@@ -1440,6 +1662,19 @@ class AppController {
         );
     }
     const response = await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, manifest.flightId);
+      const txManifest = await tx.manifest.findUnique({ where: { id }, select: { version: true, flightId: true } });
+      const txFlight = txManifest ? await tx.flight.findUnique({ where: { id: txManifest.flightId }, select: { leadId: true, status: true, reportingStartedAt: true, report: { select: { status: true } } } }) : null;
+      if (!txManifest || !txFlight || txFlight.leadId !== actor.id)
+        throw new ForbiddenException("This flight is not assigned to the Lead");
+      if (txFlight.status === FlightStatus.CANCELLED || txFlight.reportingStartedAt || (txFlight.report && !canSubmitReport(txFlight.report.status)))
+        throw new ConflictException("Catering load is locked");
+      const claimed = await tx.manifest.updateMany({
+        where: { id, version: body.version },
+        data: { version: { increment: 1 } },
+      });
+      if (claimed.count !== 1)
+        throw new ConflictException("Load plan changed on the server");
       for (const line of body.lines)
         await tx.manifestLine.update({
           where: { id: line.id },
@@ -1449,14 +1684,12 @@ class AppController {
             overrideReason: line.overrideReason?.trim() || null,
           },
         });
-      const updated = await tx.manifest.update({
-        where: { id },
-        data: { version: { increment: 1 } },
-      });
+      const updated = await tx.manifest.findUniqueOrThrow({ where: { id } });
       const result = { id, version: updated.version, savedLines: body.lines.length };
       await tx.idempotencyKey.create({
         data: {
-          key: body.operationId,
+          key: idemKey,
+          requestHash: idemHash,
           response: result,
           expiresAt: new Date(Date.now() + 7 * 86_400_000),
         },
@@ -1486,25 +1719,33 @@ class AppController {
     @Req() req: AuthedRequest,
   ) {
     const user = await authorizeMutation(req, [Role.ATTENDANT]);
+    const syncId = scopedKey(user.id, "DRAFT_SAVE", id, body.operationId);
     const duplicate = await prisma.syncOperation.findUnique({
-      where: { id: body.operationId },
+      where: { id: syncId },
     });
-    if (duplicate) return { applied: true, duplicate: true };
+    if (duplicate) {
+      if (requestHash(duplicate.payload) !== requestHash(body))
+        throw new ConflictException("Retry payload does not match the original request");
+      return { applied: true, duplicate: true, version: duplicate.manifestVersion };
+    }
     const manifest = await prisma.manifest.findUnique({
       where: { id },
       include: { lines: true, flight: { select: { status: true } } },
     });
     if (!manifest) throw new NotFoundException("Manifest not found");
-    const assigned = await prisma.crewAssignment.count({
-      where: { flightId: manifest.flightId, userId: user.id },
+    const assigned = await prisma.crewAssignment.findUnique({
+      where: { flightId_userId: { flightId: manifest.flightId, userId: user.id } },
+      select: { duty: true },
     });
     if (!assigned) throw new ForbiddenException("Flight not assigned");
+    if (assigned.duty !== "PURSER")
+      throw new ForbiddenException("Only the assigned Flight Purser may edit leftovers");
     const report = await prisma.flightReport.findUnique({
       where: { flightId: manifest.flightId },
       select: { status: true },
     });
-    if (manifest.flight.status === FlightStatus.COMPLETED || manifest.flight.status === FlightStatus.CANCELLED)
-      throw new ConflictException("Completed and cancelled flights are read-only");
+    if (manifest.flight.status === FlightStatus.CANCELLED)
+      throw new ConflictException("Cancelled flights are read-only");
     if (!canSubmitReport(report?.status || null))
       throw new ConflictException("This report is read-only");
     if (manifest.version !== body.version)
@@ -1524,13 +1765,27 @@ class AppController {
         line.consumed + line.returned + line.spoiled + line.discarded;
       if (
         [line.consumed, line.returned, line.spoiled, line.discarded].some(
-          (x) => x < 0,
+          (x) => !Number.isSafeInteger(x) || x < 0,
         ) ||
         total > original.loaded
       )
         throw new BadRequestException("Invalid reconciliation quantities");
     }
     const next = await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, manifest.flightId);
+      const txManifest = await tx.manifest.findUnique({ where: { id }, select: { flightId: true, version: true } });
+      const txAssignment = txManifest ? await tx.crewAssignment.findUnique({ where: { flightId_userId: { flightId: txManifest.flightId, userId: user.id } }, select: { duty: true } }) : null;
+      const txFlight = txManifest ? await tx.flight.findUnique({ where: { id: txManifest.flightId }, select: { status: true, report: { select: { status: true } } } }) : null;
+      if (!txManifest || !txAssignment || txAssignment.duty !== "PURSER")
+        throw new ForbiddenException("Only the assigned Flight Purser may edit leftovers");
+      if (!txFlight || txFlight.status === FlightStatus.CANCELLED || !canSubmitReport(txFlight.report?.status || null))
+        throw new ConflictException("This report is read-only");
+      const claimed = await tx.manifest.updateMany({
+        where: { id, version: body.version },
+        data: { version: { increment: 1 } },
+      });
+      if (claimed.count !== 1)
+        throw new ConflictException("Manifest changed on the server");
       for (const line of body.lines)
         await tx.manifestLine.update({
           where: { id: line.id },
@@ -1542,13 +1797,14 @@ class AppController {
             remarks: line.remarks?.trim() || null,
           },
         });
-      const updated = await tx.manifest.update({
-        where: { id },
-        data: { version: { increment: 1 } },
+      const updated = await tx.manifest.findUniqueOrThrow({ where: { id } });
+      await tx.flight.updateMany({
+        where: { id: manifest.flightId, reportingStartedAt: null },
+        data: { reportingStartedAt: new Date() },
       });
       await tx.syncOperation.create({
         data: {
-          id: body.operationId,
+          id: syncId,
           userId: user.id,
           flightId: manifest.flightId,
           manifestVersion: updated.version,
@@ -1564,90 +1820,8 @@ class AppController {
     @Body() body: { operationId: string; notes?: string },
     @Req() req: AuthedRequest,
   ) {
-    const user = await authorizeMutation(req, [Role.ATTENDANT]);
-    if (!body.operationId) throw new BadRequestException("Operation ID is required");
-    if ((body.notes || "").length > 1000)
-      throw new BadRequestException("Crew notes must not exceed 1000 characters");
-    const duplicate = await prisma.idempotencyKey.findUnique({
-      where: { key: body.operationId },
-    });
-    if (duplicate) return duplicate.response;
-    const assignment = await prisma.crewAssignment.findUnique({
-      where: { flightId_userId: { flightId, userId: user.id } },
-      include: {
-        flight: {
-          select: {
-            flightNumber: true,
-            status: true,
-            leadId: true,
-            report: { select: { status: true } },
-          },
-        },
-      },
-    });
-    if (!assignment) throw new ForbiddenException("Flight not assigned");
-    if (assignment.flight.status === FlightStatus.COMPLETED || assignment.flight.status === FlightStatus.CANCELLED)
-      throw new ConflictException("Completed and cancelled flights are read-only");
-    if (!assignment.flight.leadId)
-      throw new ConflictException("A Flight Lead must be assigned before reporting");
-    if (!canSubmitReport(assignment.flight.report?.status || null))
-      throw new ConflictException("This report is read-only");
-    const existing = await prisma.crewSubmission.findUnique({
-      where: { flightId_userId: { flightId, userId: user.id } },
-    });
-    if (existing)
-      return {
-        id: existing.id,
-        status: "SUBMITTED",
-        submittedAt: existing.submittedAt,
-        alreadySubmitted: true,
-      };
-    const assigned = await prisma.crewAssignment.count({ where: { flightId } });
-    const result = await prisma.$transaction(async (tx) => {
-      const submission = await tx.crewSubmission.create({
-        data: {
-          flightId,
-          userId: user.id,
-          duty: assignment.duty,
-          notes: body.notes?.trim() || null,
-        },
-      });
-      const submitted = await tx.crewSubmission.count({ where: { flightId } });
-      const response = {
-        id: submission.id,
-        status: "SUBMITTED",
-        submittedAt: submission.submittedAt,
-        progress: { assigned, submitted },
-      };
-      await tx.notification.create({
-        data: {
-          userId: assignment.flight.leadId!,
-          title: `${assignment.flight.flightNumber}: crew report received`,
-          body: `${user.name} reported. ${submitted}/${assigned} assigned crew complete.`,
-          kind: "CREW_REPORT",
-          flightId,
-          actionPath: "attendants",
-        },
-      });
-      await tx.idempotencyKey.create({
-        data: {
-          key: body.operationId,
-          response,
-          expiresAt: new Date(Date.now() + 30 * 86400000),
-        },
-      });
-      await tx.auditEvent.create({
-        data: {
-          actorId: user.id,
-          action: "CREW_REPORT_SUBMITTED",
-          entityType: "Flight",
-          entityId: flightId,
-          metadata: { duty: assignment.duty },
-        },
-      });
-      return response;
-    });
-    return result;
+    await authorizeMutation(req, [Role.ATTENDANT]);
+    throw new ForbiddenException("Crew completion reports are retired; submit the consolidated leftovers report");
   }
   @Post("v1/flights/:id/reports") async submitReport(
     @Param("id") flightId: string,
@@ -1655,6 +1829,7 @@ class AppController {
     body: {
       operationId: string;
       manifestVersions: Record<string, number>;
+      confirmed: boolean;
       notes?: string;
     },
     @Req() req: AuthedRequest,
@@ -1667,18 +1842,27 @@ class AppController {
       },
     });
     if (!assigned) throw new ForbiddenException("Flight not assigned");
-    if (assigned.flight.status === FlightStatus.COMPLETED || assigned.flight.status === FlightStatus.CANCELLED)
-      throw new ConflictException("Completed and cancelled flights are read-only");
+    if (assigned.flight.status === FlightStatus.CANCELLED)
+      throw new ConflictException("Cancelled flights are read-only");
     if (assigned.duty !== "PURSER")
       throw new ForbiddenException(
         "Only the assigned purser may submit the final catering reconciliation",
       );
+    if (body.confirmed !== true)
+      throw new BadRequestException("Purser confirmation is required before submission");
     if (!assigned.flight.leadId)
       throw new ConflictException("A Flight Lead must be assigned before submission");
-    const existingKey = await prisma.idempotencyKey.findUnique({
-      where: { key: body.operationId },
+    const idemKey = scopedKey(user.id, "REPORT_SUBMIT", flightId, body.operationId);
+    const idemHash = requestHash({
+      manifestVersions: body.manifestVersions,
+      confirmed: body.confirmed,
+      notes: body.notes || "",
     });
-    if (existingKey) return existingKey.response;
+    const existingKey = await prisma.idempotencyKey.findUnique({
+      where: { key: idemKey },
+    });
+    const replay = assertReplay(existingKey, idemHash);
+    if (replay) return replay;
     const existingReport = await prisma.flightReport.findUnique({
       where: { flightId },
       select: { id: true, status: true },
@@ -1687,27 +1871,9 @@ class AppController {
       throw new ConflictException(
         "Only draft or returned reports may be submitted",
       );
-    const crew = await prisma.crewAssignment.findMany({
+    let manifests = await prisma.manifest.findMany({
       where: { flightId },
-      include: {
-        user: { select: { name: true } },
-      },
-    });
-    const crewSubmissions = await prisma.crewSubmission.findMany({
-      where: { flightId },
-      select: { userId: true },
-    });
-    const submittedUsers = new Set(crewSubmissions.map((item) => item.userId));
-    const missingCrew = crew.filter((item) => !submittedUsers.has(item.userId));
-    if (missingCrew.length)
-      throw new ConflictException({
-        code: "CREW_REPORTS_PENDING",
-        message: `${missingCrew.length} assigned crew report${missingCrew.length === 1 ? " is" : "s are"} still pending`,
-        conflict: { missingCrew: missingCrew.map((item) => item.user.name) },
-      });
-    const manifests = await prisma.manifest.findMany({
-      where: { flightId },
-      include: { lines: true },
+      include: { sector: true, lines: { include: { item: true } } },
     });
     if (!manifests.length) throw new NotFoundException("Manifest not found");
     if (
@@ -1727,15 +1893,36 @@ class AppController {
         line.spoiled -
         line.discarded;
       if (
-        (line.spoiled > 0 || unexplained > 0) &&
+        (line.spoiled > 0 || line.discarded > 0 || unexplained > 0) &&
         !line.remarks?.trim() &&
         !body.notes?.trim()
       )
         throw new BadRequestException(
-          "Notes are required for spoilage or unexplained variance",
+          "Notes are required for spoilage, discarded stock or unexplained variance",
         );
     }
+    const flightSnapshot = await prisma.flight.findUniqueOrThrow({
+      where: { id: flightId },
+      include: { sectors: { orderBy: { sequence: "asc" } } },
+    });
     const result = await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, flightId);
+      const txAssignment = await tx.crewAssignment.findUnique({ where: { flightId_userId: { flightId, userId: user.id } }, select: { duty: true } });
+      const txFlight = await tx.flight.findUnique({ where: { id: flightId }, select: { status: true, leadId: true } });
+      if (!txFlight || txFlight.status === FlightStatus.CANCELLED || !txFlight.leadId)
+        throw new ConflictException("Flight is cancelled or has no assigned Cabin Services lead");
+      const txFlightReport = await tx.flightReport.findUnique({ where: { flightId }, select: { id: true, status: true, version: true } });
+      const txManifests = await tx.manifest.findMany({ where: { flightId }, include: { sector: true, lines: { include: { item: true } } } });
+      if (!txAssignment || txAssignment.duty !== "PURSER") throw new ForbiddenException("Only the assigned Flight Purser may submit");
+      if (!canSubmitReport(txFlightReport?.status || null)) throw new ConflictException("Only draft or returned reports may be submitted");
+      if (txManifests.some((manifest) => body.manifestVersions?.[manifest.id] !== manifest.version))
+        throw new ConflictException({ code: "VERSION_CONFLICT", message: "Resolve draft conflicts before submission" });
+      if (!txManifests.length) throw new ConflictException("No catering manifest is available");
+      manifests = txManifests;
+      await tx.flight.updateMany({
+        where: { id: flightId, reportingStartedAt: null },
+        data: { reportingStartedAt: new Date() },
+      });
       const report = await tx.flightReport.upsert({
         where: { flightId },
         create: {
@@ -1796,14 +1983,70 @@ class AppController {
           ),
         });
       }
+      await tx.reportRevision.create({
+        data: {
+          reportId: report.id,
+          revision: report.version,
+          snapshot: {
+            id: report.id,
+            status: report.status,
+            version: report.version,
+            purser: { id: user.id, name: user.name, email: user.email },
+            notes: body.notes || "",
+            submittedAt: report.submittedAt?.toISOString() || null,
+            approvedAt: report.approvedAt?.toISOString() || null,
+            flight: {
+              id: flightSnapshot.id,
+              flightNumber: flightSnapshot.flightNumber,
+              serviceDate: flightSnapshot.serviceDate.toISOString().slice(0, 10),
+              aircraft: flightSnapshot.aircraft,
+              status: flightSnapshot.status,
+              sectors: flightSnapshot.sectors.map((sector) => ({
+                sequence: sector.sequence,
+                origin: sector.origin,
+                destination: sector.destination,
+                scheduledDeparture: sector.scheduledDeparture.toISOString(),
+                scheduledArrival: sector.scheduledArrival.toISOString(),
+                economyPax: sector.economyPax,
+                businessPax: sector.businessPax,
+              })),
+            },
+            lines: manifests.flatMap((manifest) => manifest.lines.map((line) => ({
+              manifestLineId: line.id,
+              sector: manifest.sector.sequence,
+              origin: manifest.sector.origin,
+              destination: manifest.sector.destination,
+              cabin: manifest.cabin,
+              sku: line.item.sku,
+              item: line.item.nameEn,
+              unit: line.item.unit,
+              loaded: line.loaded,
+              consumed: line.consumed,
+              returned: line.returned,
+              spoiled: line.spoiled,
+              discarded: line.discarded,
+              unexplained: line.loaded - line.consumed - line.returned - line.spoiled - line.discarded,
+              remarks: line.remarks || "",
+            }))),
+            reviewHistory: [{
+              decision: "SUBMITTED",
+              actorName: user.name,
+              reason: "",
+              createdAt: report.submittedAt?.toISOString() || new Date().toISOString(),
+            }],
+          },
+        },
+      });
       const response = {
         id: report.id,
         status: report.status,
+        version: report.version,
         submittedAt: report.submittedAt,
       };
       await tx.idempotencyKey.create({
         data: {
-          key: body.operationId,
+          key: idemKey,
+          requestHash: idemHash,
           response,
           expiresAt: new Date(Date.now() + 7 * 86400000),
         },
@@ -1830,6 +2073,53 @@ class AppController {
       return response;
     });
     return result;
+  }
+  @Get("v1/flights/:id/report") async reportDetails(
+    @Param("id") id: string,
+    @Req() req: AuthedRequest,
+    @Query("revision") revision?: string | number,
+  ) {
+    const actor = await authenticate(req);
+    const parsedRevision = revision ? Number(revision) : undefined;
+    if (parsedRevision !== undefined && (!Number.isInteger(parsedRevision) || parsedRevision < 1))
+      throw new BadRequestException("revision must be a positive integer");
+    if (actor.role === Role.ATTENDANT) {
+      const assignment = await prisma.crewAssignment.findUnique({
+        where: { flightId_userId: { flightId: id, userId: actor.id } },
+        select: { duty: true },
+      });
+      if (!assignment || assignment.duty !== "PURSER")
+        throw new ForbiddenException("Only the assigned Flight Purser may view this report");
+    } else if (actor.role === Role.LEAD) {
+      const flight = await prisma.flight.findUnique({ where: { id }, select: { leadId: true } });
+      if (!flight || flight.leadId !== actor.id)
+        throw new ForbiddenException("This flight is not assigned to the Cabin Services lead");
+    } else if (!( [Role.PROCUREMENT, Role.ADMIN] as Role[]).includes(actor.role)) {
+      throw new ForbiddenException("Insufficient permissions");
+    }
+    return loadReportData(id, parsedRevision);
+  }
+  @Get("v1/flights/:id/report.csv") async reportCsv(
+    @Param("id") id: string,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const report = await this.reportDetails(id, req) as unknown as ReportSnapshot;
+    response.setHeader("Content-Type", "text/csv; charset=utf-8");
+    const reportDate = report.flight.serviceDate || "report";
+    response.setHeader("Content-Disposition", `attachment; filename="${report.flight.flightNumber.replace(/[^A-Za-z0-9_-]+/g, "-")}-${reportDate}-leftovers.csv"`);
+    return serializeReportCsv(report as unknown as ReportSnapshot);
+  }
+  @Get("v1/flights/:id/report.pdf") async reportPdf(
+    @Param("id") id: string,
+    @Req() req: AuthedRequest,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const report = await this.reportDetails(id, req) as unknown as ReportSnapshot;
+    response.setHeader("Content-Type", "application/pdf");
+    const reportDate = report.flight.serviceDate || "report";
+    response.setHeader("Content-Disposition", `attachment; filename="${report.flight.flightNumber.replace(/[^A-Za-z0-9_-]+/g, "-")}-${reportDate}-leftovers.pdf"`);
+    return new StreamableFile(await renderReportPdf(report), { type: "application/pdf" });
   }
   @Get("v1/approvals") async approvals(@Req() req: AuthedRequest) {
     const actor = await authenticate(req, [Role.LEAD]);
@@ -1866,6 +2156,7 @@ class AppController {
             id: true,
             flightNumber: true,
             flightDate: true,
+            serviceDate: true,
             aircraft: true,
             status: true,
             sectors: true,
@@ -1896,16 +2187,24 @@ class AppController {
       decision: "FORWARDED" | "APPROVED" | "RETURNED" | "REJECTED";
       reason?: string;
       operationId: string;
+      version: number;
     },
     @Req() req: AuthedRequest,
   ) {
     const actor = await authorizeMutation(req, [Role.LEAD, Role.PROCUREMENT]);
+    const idemKey = scopedKey(actor.id, "REPORT_DECISION", id, body.operationId);
+    const idemHash = requestHash({
+      decision: body.decision,
+      version: body.version,
+      reason: body.reason || "",
+    });
     if (!["APPROVED", "FORWARDED"].includes(body.decision) && !body.reason?.trim())
       throw new BadRequestException("Reason is required");
     const duplicate = await prisma.idempotencyKey.findUnique({
-      where: { key: body.operationId },
+      where: { key: idemKey },
     });
-    if (duplicate) return duplicate.response;
+    const replay = assertReplay(duplicate, idemHash);
+    if (replay) return replay;
     const report = await prisma.flightReport.findUnique({
       where: { id },
       include: {
@@ -1935,6 +2234,8 @@ class AppController {
         : ReportStatus.FORWARDED;
     if (!report || report.status !== expectedStatus)
       throw new ConflictException("Report is no longer awaiting approval");
+    if (!Number.isInteger(body.version) || body.version !== report.version)
+      throw new ConflictException({ code: "VERSION_CONFLICT", message: "Report revision changed on the server" });
     if (!canDecideReport(actor.role, report.status, body.decision as ReportStatus))
       throw new ForbiddenException("Decision is not permitted for this role");
     if (actor.role === Role.LEAD && report.flight.leadId !== actor.id)
@@ -1963,19 +2264,27 @@ class AppController {
       }
     }
     const result = await prisma.$transaction(async (tx) => {
+      await lockFlight(tx, report.flightId);
       const status = body.decision as ReportStatus;
-      const updated = await tx.flightReport.update({
-        where: { id },
-        data: {
-          status,
-          approvedAt: status === ReportStatus.APPROVED ? new Date() : null,
-        },
+      const txReport = await tx.flightReport.findUnique({ where: { id }, select: { status: true, version: true, flight: { select: { leadId: true } } } });
+      if (!txReport || txReport.status !== expectedStatus || txReport.version !== body.version)
+        throw new ConflictException("Report is no longer awaiting approval");
+      if (actor.role === Role.LEAD && txReport.flight.leadId !== actor.id)
+        throw new ForbiddenException("This flight is not assigned to the Lead");
+      const claimed = await tx.flightReport.updateMany({
+        where: { id, status: expectedStatus, version: body.version },
+        data: { status, approvedAt: status === ReportStatus.APPROVED ? new Date() : null },
       });
+      if (claimed.count !== 1)
+        throw new ConflictException("Report is no longer awaiting approval");
+      const updated = await tx.flightReport.findUniqueOrThrow({ where: { id } });
       await tx.approval.create({
         data: {
           reportId: id,
           actorId: actor.id,
+          actorName: actor.name,
           decision: status,
+          revision: report.version,
           reason: body.reason,
         },
       });
@@ -2000,7 +2309,7 @@ class AppController {
                   quantity: reason === "RETURN" ? qty : -qty,
                   reason,
                   flightId: report.flightId,
-                  operationId: `${body.operationId}:${source.id}:${reason}`,
+                  operationId: `${idemKey}:${source.id}:${reason}`,
                   unitCostMinor: unitCost,
                 },
               });
@@ -2013,7 +2322,8 @@ class AppController {
       };
       await tx.idempotencyKey.create({
         data: {
-          key: body.operationId,
+          key: idemKey,
+          requestHash: idemHash,
           response,
           expiresAt: new Date(Date.now() + 30 * 86400000),
         },
@@ -2263,7 +2573,16 @@ export class AppModule {}
 // Function invoked per-request (see /api/[...path].ts).
 export async function createApp() {
   sameSiteCookie();
-  const app = await NestFactory.create(AppModule);
+  if (process.env.NODE_ENV === "production") {
+    const origins = (process.env.WEB_ORIGIN || "").split(",").map((origin) => origin.trim()).filter(Boolean);
+    if (!origins.length) throw new Error("WEB_ORIGIN must be explicitly configured for a production build");
+    const urls = origins.map((origin) => new URL(origin));
+    const remote = urls.some((url) => !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname));
+    if (remote && (!secureCookie() || urls.some((url) => url.protocol !== "https:")))
+      throw new Error("Production deployments require HTTPS WEB_ORIGIN values and COOKIE_SECURE=true");
+  }
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  app.useBodyParser("json", { limit: 3_000_000 });
   app.getHttpAdapter().getInstance().set("trust proxy", 1);
   app.useGlobalFilters(new ApiExceptionFilter());
   app.use(cookieParser());

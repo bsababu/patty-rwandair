@@ -93,9 +93,12 @@ model Flight {
   id String @id @default(uuid())
   flightNumber String
   flightDate DateTime
+  serviceDate DateTime @db.Date
   aircraft String
   status FlightStatus @default(SCHEDULED)
   version Int @default(1)
+  reportingStartedAt DateTime?
+  scheduleIssue String?
   leadId String?
   lead User? @relation("FlightLead", fields: [leadId], references: [id])
   cateringListId String?
@@ -106,7 +109,9 @@ model Flight {
   manifests Manifest[]
   report FlightReport?
   @@unique([flightNumber, flightDate])
+  @@unique([flightNumber, serviceDate])
   @@index([flightDate, status])
+  @@index([serviceDate, status])
   @@index([leadId, flightDate])
   @@index([cateringListId])
 }
@@ -226,6 +231,18 @@ model FlightReport {
   approvedAt DateTime?
   approvals Approval[]
   lines ReportLine[]
+  revisions ReportRevision[]
+}
+
+model ReportRevision {
+  id String @id @default(uuid())
+  reportId String
+  report FlightReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  revision Int
+  snapshot Json
+  createdAt DateTime @default(now())
+  @@unique([reportId, revision])
+  @@index([reportId, createdAt])
 }
 model ReportLine {
   id String @id @default(uuid())
@@ -251,6 +268,8 @@ model Approval {
   decision ReportStatus
   reason String?
   createdAt DateTime @default(now())
+  actorName String
+  revision Int @default(1)
 }
 model StockMovement {
   id String @id @default(uuid())
@@ -297,6 +316,7 @@ model AuditEvent {
 model IdempotencyKey {
   key String @id
   response Json
+  requestHash String?
   createdAt DateTime @default(now())
   expiresAt DateTime
   @@index([expiresAt])

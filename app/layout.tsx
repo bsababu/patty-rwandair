@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 import './product.css';
 import './remediation.css';
+import './reports.css';
 
 export const metadata: Metadata = {
   title: 'RwandAir Catering Control',

@@ -12,6 +12,10 @@ const apiOrigin = (process.env.NEXT_PUBLIC_API_URL || "/api").replace(/\/+$/, ""
 const DB = "wingsbalance-offline",
   STORE = "operations",
   CACHE_STORE = "assigned-cache";
+export type OfflineDraft = { id: string; path: string; method: string; body: string; userId: string; createdAt: string; status: "QUEUED" | "CONFLICT" | "FAILED" };
+const offlineChanged = () => {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("rwandair-offline-change"));
+};
 function offlineDb() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB, 2);
@@ -42,6 +46,27 @@ async function queue(path: string, options: RequestInit) {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
+  offlineChanged();
+}
+export async function offlineDrafts(): Promise<OfflineDraft[]> {
+  if (!offlineUserId || typeof indexedDB === "undefined") return [];
+  const db = await offlineDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(STORE).objectStore(STORE).getAll();
+    request.onsuccess = () => resolve((request.result as OfflineDraft[]).filter((entry) => entry.userId === offlineUserId));
+    request.onerror = () => reject(request.error);
+  });
+}
+export async function discardOfflineDraft(id: string) {
+  if (!(await offlineDrafts()).some((entry) => entry.id === id)) throw new Error("Offline draft is not available to this user");
+  const db = await offlineDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  offlineChanged();
 }
 async function cacheAssigned(path: string, payload: unknown) {
   if (!offlineUserId || offlineRole !== "ATTENDANT") return;
@@ -144,18 +169,28 @@ export async function api<T>(
   await cacheAssigned(path, payload).catch(() => {});
   return payload as T;
 }
-export const operationId = () => crypto.randomUUID();
-async function replay() {
-  if (typeof indexedDB === "undefined" || !csrf) return;
-  const db = await offlineDb();
-  const rows = await new Promise<
-    Array<{ id: string; path: string; method: string; body: string; userId: string }>
-  >((resolve, reject) => {
-    const request = db.transaction(STORE).objectStore(STORE).getAll();
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+
+export async function download(path: string) {
+  const response = await fetch(apiOrigin + "/v1" + path, {
+    credentials: "include",
+    cache: "no-store",
   });
-  for (const row of rows.filter((item) => item.userId === offlineUserId)) {
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.message || "Download failed");
+  }
+  return { blob: await response.blob(), fileName: response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1] || "report.csv" };
+}
+export const operationId = () => crypto.randomUUID();
+let replaying = false;
+export async function replay() {
+  if (typeof indexedDB === "undefined" || !csrf) return;
+  if (replaying) return;
+  replaying = true;
+  try {
+  const db = await offlineDb();
+  const rows = (await offlineDrafts()).filter((row) => row.status === "QUEUED").sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const row of rows) {
     try {
       await api(row.path, { method: row.method, body: row.body });
       const tx = db.transaction(STORE, "readwrite");
@@ -171,6 +206,10 @@ async function replay() {
       }
       break;
     }
+  }
+  } finally {
+    replaying = false;
+    offlineChanged();
   }
 }
 if (typeof window !== "undefined")

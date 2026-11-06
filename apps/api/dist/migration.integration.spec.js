@@ -1,0 +1,60 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const strict_1 = __importDefault(require("node:assert/strict"));
+const node_child_process_1 = require("node:child_process");
+const node_crypto_1 = require("node:crypto");
+const node_fs_1 = require("node:fs");
+const node_path_1 = require("node:path");
+const node_test_1 = __importDefault(require("node:test"));
+const testUrl = process.env.TEST_DATABASE_URL;
+const migrations = (0, node_path_1.resolve)(process.cwd(), "prisma/migrations");
+const latest = "20261105090000_flight_service_date_reporting";
+function legacySchema() {
+    strict_1.default.ok(testUrl);
+    strict_1.default.match(new URL(testUrl).pathname, /test|verification/i);
+    const schema = `migration_${(0, node_crypto_1.randomUUID)().replaceAll("-", "")}`;
+    const env = { ...process.env, PGOPTIONS: `-c search_path=${schema}` };
+    const sql = (query) => (0, node_child_process_1.execFileSync)("psql", [testUrl, "-X", "-v", "ON_ERROR_STOP=1", "-At", "-c", query], { env, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    const apply = (name) => (0, node_child_process_1.execFileSync)("psql", [testUrl, "-X", "-v", "ON_ERROR_STOP=1", "-q", "-f", (0, node_path_1.resolve)(migrations, name, "migration.sql")], { env, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+    sql(`CREATE SCHEMA ${schema}`);
+    for (const name of (0, node_fs_1.readdirSync)(migrations).sort().filter((name) => name < latest))
+        apply(name);
+    return { sql, apply };
+}
+(0, node_test_1.default)("migration recovers archived service dates and preserves legacy report revisions", { skip: !testUrl }, () => {
+    const { sql, apply } = legacySchema();
+    sql(`
+    INSERT INTO "User" (id,email,"passwordHash",name,role) VALUES ('u1','migration@verification.test','not-a-login','Current staff name','ATTENDANT');
+    INSERT INTO "Flight" (id,"flightNumber","flightDate",aircraft,status) VALUES ('f1','WB 435','2026-09-05 06:00:00','A330','COMPLETED');
+    INSERT INTO "Sector" (id,"flightId",sequence,origin,destination,"scheduledDeparture","scheduledArrival","economyPax","businessPax") VALUES ('s1','f1',1,'KGL','NBO','2026-09-05 06:00:00','2026-09-05 08:00:00',100,10);
+    INSERT INTO "CatalogItem" (id,sku,"nameEn","nameFr",category,unit) VALUES ('i1','MEAL-MIGRATION','Meal','Repas','Meal','meal');
+    INSERT INTO "Manifest" (id,"flightId","sectorId",cabin) VALUES ('m1','f1','s1','ECONOMY');
+    INSERT INTO "ManifestLine" (id,"manifestId","itemId",suggested,planned,approved,loaded,consumed,returned) VALUES ('l1','m1','i1',10,10,10,10,7,3);
+    INSERT INTO "FlightReport" (id,"flightId","purserId","purserName",status,version,"submittedAt") VALUES ('r1','f1','u1','Name at submission','RETURNED',2,'2026-11-04 09:00:00');
+    INSERT INTO "ReportLine" (id,"reportId","manifestLineId",consumed,returned,spoiled,discarded,unexplained,revision) VALUES ('rl1','r1','l1',8,2,0,0,0,1),('rl2','r1','l1',7,3,0,0,0,2);
+    INSERT INTO "Approval" (id,"reportId","actorId",decision,reason) VALUES ('a1','r1','u1','RETURNED','Recount');
+    INSERT INTO "ImportBatch" (id,type,status,"fileName",checksum,"sourceText",rows,"rowCount","errorCount","actorId",result)
+    VALUES ('b1','FLIGHTS','COMMITTED','legacy.csv','fixture','archived source',
+      '[{"row":2,"data":{"flight_number":"WB 435","flight_date":"2026-11-04","sector_sequence":"1","departure_iso":"2026-09-05T08:00:00+02:00"},"errors":[]}]',1,0,'u1','{"ids":["f1"]}');
+  `);
+    apply(latest);
+    strict_1.default.equal(sql(`SELECT "serviceDate"::text FROM "Flight" WHERE id='f1'`), "2026-11-04");
+    strict_1.default.equal(sql(`SELECT "flightDate"::text FROM "Flight" WHERE id='f1'`), "2026-09-05 06:00:00");
+    strict_1.default.equal(sql(`SELECT "scheduleIssue" IS NOT NULL AND "reportingStartedAt" IS NOT NULL FROM "Flight" WHERE id='f1'`), "t");
+    strict_1.default.equal(sql(`SELECT COUNT(*) FROM "ReportRevision" WHERE "reportId"='r1'`), "2");
+    strict_1.default.equal(sql(`SELECT snapshot->'purser'->>'name' FROM "ReportRevision" WHERE "reportId"='r1' AND revision=1`), "Name at submission");
+    strict_1.default.equal(sql(`SELECT snapshot->'lines'->0->>'consumed' FROM "ReportRevision" WHERE "reportId"='r1' AND revision=1`), "8");
+    strict_1.default.equal(sql(`SELECT "actorName" FROM "Approval" WHERE id='a1'`), "Current staff name");
+    const retained = sql(`SELECT snapshot->'flight'->'sectors'->0->>'scheduledDeparture' FROM "ReportRevision" WHERE "reportId"='r1' AND revision=1`);
+    strict_1.default.equal(new Date(retained).toISOString(), "2026-09-05T06:00:00.000Z");
+});
+(0, node_test_1.default)("migration stops on duplicate canonical flight/date keys instead of merging flights", { skip: !testUrl }, () => {
+    const { sql, apply } = legacySchema();
+    sql(`INSERT INTO "Flight" (id,"flightNumber","flightDate",aircraft) VALUES ('a','WB 700','2026-11-04 06:00:00','A330'),('b','WB 700','2026-11-04 12:00:00','A330')`);
+    strict_1.default.throws(() => apply(latest), (error) => error instanceof Error && error.message.includes("duplicate flight/date records"));
+    strict_1.default.equal(sql(`SELECT COUNT(*) FROM "Flight"`), "2");
+    strict_1.default.equal(sql(`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='Flight' AND column_name='serviceDate'`), "0", "a failed migration must roll back all schema/data changes");
+});

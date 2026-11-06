@@ -43,3 +43,5 @@ next-env.d.ts
 
 node_modules/
 .openai/
+test-results/
+playwright-report/

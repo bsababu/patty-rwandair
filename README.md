@@ -135,8 +135,9 @@ COOKIE_SAMESITE=lax
 DEMO_PASSWORD=<seed-only password>
 ```
 
-`WEB_ORIGIN` is optional when same-origin, but set it to your production
-domain for defense-in-depth CORS.
+Set `WEB_ORIGIN` to the production HTTPS origin. Remote production startup
+requires this origin and `COOKIE_SECURE=true`; explicit localhost origins
+remain supported for local Docker development.
 
 `DATABASE_URL` must be set **before the first build**, because
 `prisma generate` reads it while resolving the schema.
@@ -214,6 +215,13 @@ It is not part of the Vercel production pipeline.
   stale or the deployment is using an outdated image. Rebuild the stack.
 - A proxy connection error means the API container is not healthy. Check
   `docker compose ps` and `docker compose logs api`.
+- `Database schema is out of date` or `Flight.serviceDate does not exist` means
+  the API and database are on different migration versions. Run
+  `DATABASE_URL=<same-database-url> npm --prefix apps/api run prisma:migrate`,
+  then restart the API. For host development with `apps/api/.env.local`, use
+  `npm --prefix apps/api run prisma:migrate:local`. For Docker, run
+  `docker compose up -d --build` and confirm `docker compose logs migrate` ends
+  successfully.
 - For `http://localhost:3001`, a proxy connection error means the host API is
   not running on port `4000`. Start it with
   `npm --prefix apps/api run dev`; do not use the Docker-only root `.env` as the
@@ -241,52 +249,47 @@ unless `NEXT_PUBLIC_DEMO_PERSONAS=true` is enabled at build time.
 
 The fictional crew directory also contains `attendant2@wings.rw`,
 `attendant3@wings.rw` and `attendant4@wings.rw`, using the same development
-password. They allow Leads to exercise multi-crew assignment and completion
-tracking on newly imported flights.
+password. These are additional eligible Flight Purser accounts; each flight has
+one assigned purser. Internal role codes remain unchanged for compatibility.
 
-## Roles and demo behavior
+## Role quick guide
 
-- Attendant: edits operational quantities, switches cabin and sends an
-  individual crew completion. Monetary item pricing is not exposed. The
-  assigned purser is the only crew member who can submit the consolidated
-  catering reconciliation.
-- Lead: works only with assigned, non-overlapping flights; assigns one purser
-  and the cabin crew, selects the matching Procurement catering list, reviews
-  crew completion, uses explainable load planning, reviews the operational report and forwards it for
-  reconciliation. The workspace refreshes every 15 seconds and creates an
-  actionable notification for each crew completion and final report.
-- Procurement: owns flight and catering imports, catering-list names, Lead
-  assignment, prices, inventory, waste analytics and final ledger approval.
-  Reconciliation is intentionally flight-centric: flight number, route/date and
-  catering consumption, return, waste and unexplained totals. Crew management
-  is not exposed in the Procurement workflow.
-- Director: reads aggregate financial KPIs, savings opportunities and explainable insights.
+| Role | Use the application to |
+| --- | --- |
+| Flight Purser | Open the assigned flight after arrival, enter consumed/returned/spoiled/discarded/unexplained quantities, add notes, and submit one consolidated leftovers report. |
+| Cabin Services | Assign one Flight Purser, attach the catering list matching flight number and service date, review every sector/cabin, return corrections, or forward the report to Catering. |
+| Catering | Import flights first, import matching catering lists, assign Cabin Services leads, maintain stock/prices, review forwarded reports, and approve once to post the ledger. |
+| Director | Read aggregate approved-cost, waste, savings, and operational KPI views; no raw report or crew-assignment edits. |
+| Admin | Create/deactivate accounts, reset access, and review the audit log; do not perform operational approvals. |
+
+Each person signs in with the account assigned to their role. Do not use another
+role's account to bypass workflow ownership.
 
 Accounts, opaque sessions, and login throttling are stored in PostgreSQL with
 Argon2 password hashes; state-changing requests require the session CSRF token.
 Set `COOKIE_SECURE=true` behind production HTTPS.
 
-### Crew reporting workflow
+### Leftovers reporting workflow
 
-1. The Lead assigns the flight crew and exactly one purser. Assignment changes
-   are locked as soon as any crew member reports, preventing the accountability
-   roster from changing during reconciliation.
-2. Each assigned attendant sends one idempotent crew completion from **My
-   flight**. Optional service notes are retained against that crew member and
-   the Lead receives a notification.
-3. The Lead can search the roster by name/email, sort pending reports first and
-   send reminders to missing crew.
-4. The purser sends the single consolidated catering report. The API rejects it
-   with `CREW_REPORTS_PENDING` and the missing names until every assigned crew
-   member has reported.
-5. The Lead receives a **final report ready** notification, reviews the
-   flight-level totals, then forwards the report to Procurement. Only
-   Procurement approval posts the stock ledger.
+1. Cabin Services assigns exactly one Flight Purser.
+2. After the final scheduled arrival, the Flight Purser opens the flight and
+   confirms the prepared report from the saved quantities.
+3. The report contains the date, purser name, flight number, route, sectors,
+   cabins, item quantities, variance notes and review status.
+4. Cabin Services reviews and forwards the report to Catering. Only Catering
+   approval posts the stock ledger.
 
-Relevant endpoints are `POST /api/v1/flights/:id/crew-submissions`,
-`GET /api/v1/lead/flights/:id/crew-status`,
-`POST /api/v1/lead/flights/:id/crew/:userId/remind`, and
-`PATCH /api/v1/notifications/:id/read`.
+The purser reviews all sectors and cabins before confirming submission. Reports
+can be completed after a flight is marked completed; cancelled flights cannot
+be edited. Pending reports become overdue after the last scheduled arrival.
+There is no scheduled submission or email service.
+
+Report endpoints are `GET /api/v1/flights/:id/report`,
+`GET /api/v1/flights/:id/report.csv`, and `GET /api/v1/flights/:id/report.pdf`.
+Submission uses `POST /api/v1/flights/:id/reports`. The former individual
+`crew-submissions` mutation is retired. Submitted revisions retain their own
+flight, purser, item and quantity snapshots. Returned reports open the current
+saved draft, while earlier submitted revisions remain available for audit.
 
 ## Stock invariants
 
@@ -300,7 +303,7 @@ on-hand, reserved and available quantities; reorder alerts use available stock.
 Quantity requests carry an idempotency key and manifest version so retries are
 safe and concurrent edits are rejected explicitly.
 
-Only Attendant manifest drafts are queued offline. Final submission, approval,
+Only Flight Purser manifest drafts are queued offline. Final submission, approval,
 price and administrative mutations require a live connection. Cached flight
 manifests and queued drafts are isolated by signed-in user and cleared at
 logout; Procurement and Director responses are never cached.
@@ -320,28 +323,66 @@ The forecast adapter uses recent passenger-normalized consumption. It prefers a 
   (default `25`). It is an explicit planning assumption, not booked savings.
 - The pre-remediation local safety backup is stored outside the repository at `/tmp/wingsbalance-backups/pre-remediation.dump`.
 
-## Procurement CSV imports
+## Catering CSV imports
 
-Procurement users open **Upload data** from the desktop sidebar or mobile
-workspace navigation and choose one of two audited workflows:
+Catering users open **Upload data** from the desktop sidebar or mobile
+workspace navigation. Import Flights first, then the matching Catering file:
 
 - `docs/flights-template.csv` creates a flight with one or more ordered sectors
   and cabin passenger counts.
 - `docs/catering-template.csv` creates or updates a named catering list by
   flight date, sector, cabin and active catalog SKU. It never changes prices.
-  A Lead can select that list only when its flight number and date match.
+  Cabin Services can select that list only when its flight number and date match.
 
-Crew assignment is intentionally not a CSV import. The assigned Lead selects
-active attendants in the application and must designate exactly one purser;
+Crew assignment is intentionally not a CSV import. Cabin Services selects one
+active Flight Purser in the application;
 the API rejects overlapping crew assignments.
 
 Every upload has a preview stage with row-level errors. The server stores the
 original CSV and parsed preview as an import batch, then reparses and revalidates
 the stored source during commit. The browser cannot alter validated rows before
 commit. Repeated previews of the same source reuse the pending batch, commits
-claim the batch atomically, and the Lead can explicitly cancel an abandoned
-preview. Completed and cancelled batches remain in Procurement import history and
+claim the batch atomically, and Catering can explicitly cancel an abandoned
+preview. Completed and cancelled batches remain in Catering import history and
 all actions are written to the audit log.
 
 The pilot accepts UTF-8 CSV files up to 1 MB and 1,000 data rows. Flight numbers
 may be entered as `WB435` or `WB 435`; they are normalized to `WB 435`.
+
+Both UI downloads come from `packages/contracts/src/import-templates.ts` and
+match the examples in `docs/`. The service date is a calendar date independent
+of UTC departure time. Only the first sector must depart on that calendar date;
+later sectors can depart on subsequent days. Departure/arrival timestamps need
+explicit UTC offsets, and sectors must connect in route and time order.
+Re-previewing refreshes row errors after dependencies change. Invalid previews
+offer a row-error CSV download.
+
+## Verification and release
+
+The API integration suite runs only when `TEST_DATABASE_URL` is supplied and
+must target an isolated test database. It creates its own fixture users,
+sessions, flights and stock. Ordinary unit tests do not connect to a database.
+
+Run `npm test` for unit tests. With a migrated isolated database, run
+`TEST_DATABASE_URL=<isolated-test-url> npm test` to include PostgreSQL workflow
+and migration checks. Run
+`TEST_DATABASE_URL=<isolated-test-url> npm run test:e2e` for the browser workflow;
+it starts its own API and web servers on ports 4401 and 4301. Install Chromium
+with `npx playwright install chromium`, or set `PLAYWRIGHT_CHROME_CHANNEL=chrome`
+to use an installed Chrome. CI runs both the database and browser suites.
+
+Before releasing the service-date migration, restore a production backup into
+staging and apply migrations there. The migration derives service dates from
+unambiguous committed flight imports where available and otherwise preserves
+the existing UTC calendar date. It aborts on flight/date collisions instead of
+merging records. Resolve collisions from reviewed source data before retrying.
+Historical schedule inconsistencies are flagged for correction rather than
+silently changing flight times or financial records.
+Legacy report snapshots preserve the historical quantities and metadata still
+retained in the database. The report identifies reconstructed historical records;
+metadata absent from older revisions is not invented.
+
+Verify a complete import, purser assignment, report submission, returned
+correction, Cabin Services forwarding and Catering approval in staging. Confirm
+PDF/CSV totals match the report and retrying approval leaves the ledger unchanged.
+Production requires HTTPS, secure session cookies and an explicit web origin.
