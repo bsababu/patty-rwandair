@@ -89,15 +89,15 @@ const status = (error) => typeof error === "object" && error !== null && "getSta
     let flightId = "";
     let reportId = "";
     let reportVersion = 0;
-    let firstPreviewId = "";
     let firstSnapshot;
     const manifests = () => call("manifest", flightId, purserReq);
     try {
-        await t.test("refreshes missing-flight errors after a valid overnight flight import", async () => {
+        await t.test("imports catering before the operational flight schedule exists", async () => {
+            await strict_1.default.rejects(call("flights", cateringReq), (error) => status(error) === 403);
             const before = await call("previewImport", { type: "CATERING", fileName: "catering.csv", csv: cateringCsv }, cateringReq);
-            firstPreviewId = before.id;
-            strict_1.default.equal(before.errorCount, 4);
+            strict_1.default.equal(before.errorCount, 0, JSON.stringify(before.rows));
             strict_1.default.equal(before.rows.some((row) => row.errors.some((error) => error.includes("Duplicate"))), false);
+            await call("commitImport", before.id, cateringReq);
             const flightPreview = await call("previewImport", { type: "FLIGHTS", fileName: "flights.csv", csv: flightCsv }, cateringReq);
             strict_1.default.equal(flightPreview.errorCount, 0, JSON.stringify(flightPreview.rows));
             const result = await call("commitImport", flightPreview.id, cateringReq);
@@ -105,12 +105,15 @@ const status = (error) => typeof error === "object" && error !== null && "getSta
             const flight = await db.flight.findUniqueOrThrow({ where: { id: flightId } });
             strict_1.default.equal(flight.serviceDate.toISOString().slice(0, 10), "2026-11-04");
             strict_1.default.equal(flight.flightDate.toISOString().slice(0, 10), "2026-11-03");
-            const refreshed = await call("previewImport", { type: "CATERING", fileName: "catering.csv", csv: cateringCsv }, cateringReq);
-            strict_1.default.equal(refreshed.id, firstPreviewId);
-            strict_1.default.equal(refreshed.errorCount, 0, JSON.stringify(refreshed.rows));
-            await call("commitImport", refreshed.id, cateringReq);
             const list = await db.cateringList.findUniqueOrThrow({ where: { flightNumber_serviceDate: { flightNumber: flight.flightNumber, serviceDate: flight.serviceDate } } });
-            await db.flight.update({ where: { id: flightId }, data: { leadId: accounts[1].id } });
+            const queue = await call("procurementCateringWorkQueue", cateringReq);
+            const queueItem = queue.find((item) => item.id === list.id);
+            strict_1.default.equal(queueItem?.assignmentStatus, "READY_TO_ATTACH");
+            strict_1.default.equal(queueItem?.matchingFlight?.id, flightId);
+            await call("assignCateringList", list.id, { flightId, operationId: (0, node_crypto_1.randomUUID)() }, cateringReq);
+            strict_1.default.equal((await db.flight.findUniqueOrThrow({ where: { id: flightId } })).cateringListId, list.id);
+            strict_1.default.ok((await db.manifest.count({ where: { flightId } })) > 0);
+            await call("assignFlightLead", flightId, { leadId: accounts[1].id }, cateringReq);
             await call("attachCateringList", flightId, list.id, { operationId: (0, node_crypto_1.randomUUID)() }, leadReq);
         });
         await t.test("enforces one purser and keeps legacy crew read-only after completion", async () => {

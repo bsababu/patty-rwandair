@@ -6,7 +6,7 @@
     "dev:local": "npm run dev",
     "build": "nest build",
     "start": "node dist/main.js",
-    "test": "node --import tsx --test src/*.spec.ts",
+    "test": "node --import tsx --test src/*.spec.ts ../../tests/run-drafts.unit.ts",
     "test:integration": "node --import tsx --test src/workflow.integration.spec.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",

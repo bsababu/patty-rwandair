@@ -16,6 +16,7 @@ const base: ReportSnapshot = {
     sectors: [{ sequence: 1, origin: "KGL", destination: "NBO", scheduledDeparture: "2026-11-04T06:00:00Z", scheduledArrival: "2026-11-04T08:00:00Z", economyPax: 100, businessPax: 10 }],
   },
   purser: { id: "u1", name: "Mugisha Éric", email: "purser@example.test" },
+  pursers: [{ id: "u1", name: "Mugisha Éric", email: "purser@example.test" }, { id: "u2", name: "Uwase Keza", email: "relief@example.test" }],
   notes: "Variance reviewed",
   submittedAt: "2026-11-04T09:00:00Z",
   approvedAt: null,
@@ -26,11 +27,13 @@ const base: ReportSnapshot = {
 test("CSV preserves all report metadata and neutralizes formula text", () => {
   const csv = serializeReportCsv(base);
   assert.match(csv, /Mugisha Éric/);
+  assert.match(csv, /Uwase Keza/);
   assert.match(csv, /'=?SUM\(A1:A2\)/);
   assert.match(csv, /Variance reviewed/);
   assert.match(csv, /\r\n/);
   const records = parseCsv(csv);
   assert.ok(records.every((row) => row.length === records[0].length));
+  assert.equal(records.filter((row) => row[0] === "TEAM_MEMBER").length, 2);
   const actorColumn = records[0].indexOf("review_actor");
   assert.equal(records.find((row) => row[0] === "REVIEW")?.[actorColumn], "Mugisha Éric");
   for (const remarks of ["=SUM(A1:A2)", "\t=1+1", "\r@SUM(A1:A2)", "  +1+1", "-1+1"]) {
@@ -67,4 +70,5 @@ test("PDF paginates complete reports and preserves every item and remark", async
   assert.match(extracted, /Item 99/);
   assert.match(extracted, /Remark/);
   assert.match(extracted, /Mugisha Éric/);
+  assert.match(extracted, /Uwase Keza/);
 });

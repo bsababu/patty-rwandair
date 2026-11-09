@@ -36,7 +36,7 @@ export default defineConfig({
       url: baseURL,
       timeout: 120_000,
       reuseExistingServer: false,
-      env: { DATABASE_URL: databaseUrl, API_PROXY_TARGET: apiURL, COOKIE_SECURE: "false", WEB_ORIGIN: baseURL, NEXT_PUBLIC_DEMO_PERSONAS: "false" },
+      env: { DATABASE_URL: databaseUrl, API_PROXY_TARGET: apiURL, COOKIE_SECURE: "false", WEB_ORIGIN: baseURL, NEXT_PUBLIC_DEMO_PERSONAS: "false", NEXT_DIST_DIR: ".next-e2e" },
     },
   ],
 });

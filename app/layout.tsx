@@ -3,6 +3,7 @@ import './globals.css';
 import './product.css';
 import './remediation.css';
 import './reports.css';
+import './workspace.css';
 
 export const metadata: Metadata = {
   title: 'RwandAir Catering Control',

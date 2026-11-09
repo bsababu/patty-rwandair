@@ -19,14 +19,21 @@ export const importHeaders = {
   ],
   CATERING: [
     "flight_number",
+    "loaded",
+  ],
+} as const;
+
+export const optionalImportHeaders = {
+  CATERING: [
+    "service_date",
     "flight_date",
-    "sector_sequence",
-    "cabin",
+    "item",
     "item_sku",
+    "cabin",
+    "sector_sequence",
     "suggested",
     "planned",
     "approved",
-    "loaded",
     "override_reason",
   ],
 } as const;
@@ -64,7 +71,11 @@ export function parseCsv(source: string) {
   return records;
 }
 
-export function csvRecords(source: string, required: readonly string[]) {
+export function csvRecords(
+  source: string,
+  required: readonly string[],
+  optional: readonly string[] = [],
+) {
   const records = parseCsv(source);
   if (records.length < 2) throw new Error("CSV contains no data rows");
   const headers = records[0].map((value, index) =>
@@ -75,7 +86,7 @@ export function csvRecords(source: string, required: readonly string[]) {
   if (duplicates.length) throw new Error(`Duplicate CSV columns: ${[...new Set(duplicates)].join(", ")}`);
   const missing = required.filter((header) => !headers.includes(header));
   if (missing.length) throw new Error(`Missing CSV columns: ${missing.join(", ")}`);
-  const unknown = headers.filter((header) => !required.includes(header));
+  const unknown = headers.filter((header) => !required.includes(header) && !optional.includes(header));
   if (unknown.length) throw new Error(`Unknown CSV columns: ${unknown.join(", ")}`);
   return records.slice(1).map((values, index) => ({
     row: index + 2,

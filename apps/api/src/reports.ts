@@ -32,6 +32,7 @@ export type ReportSnapshot = {
   id: string | null;
   status: ReportStatus;
   version: number;
+  runVersion?: number;
   flight: {
     id: string;
     flightNumber: string;
@@ -49,6 +50,7 @@ export type ReportSnapshot = {
     }>;
   };
   purser: { id: string | null; name: string; email: string };
+  pursers?: Array<{ id: string | null; name: string; email: string }>;
   notes: string;
   submittedAt: string | null;
   approvedAt: string | null;
@@ -101,6 +103,7 @@ export function serializeReportCsv(snapshot: ReportSnapshot) {
   return [header.join(","), ...snapshot.lines.map((line) => lineRow(line, "LINE")),
     ...reportTotals(snapshot).map((line) => lineRow({ ...line, remarks: "" }, "TOTAL")),
     row({ ...common, record_type: "NOTES" }),
+    ...(snapshot.pursers || []).map((purser) => row({ ...common, record_type: "TEAM_MEMBER", purser_id: purser.id, purser_name: purser.name, purser_email: purser.email })),
     ...snapshot.reviewHistory.map((event) => row({ ...common, record_type: "REVIEW", review_decision: event.decision,
       review_actor: event.actorName, review_at: event.createdAt, review_reason: event.reason })),
   ].join("\r\n") + "\r\n";
@@ -120,14 +123,17 @@ export async function renderReportPdf(snapshot: ReportSnapshot): Promise<Buffer>
   };
   heading("RwandAir leftovers report");
   document.font("Helvetica").fontSize(9).text(`Report ID: ${snapshot.id || "Draft"}   Status: ${snapshot.status}   Revision: ${snapshot.version}`);
-  document.text(`Flight: ${snapshot.flight.flightNumber}   Service date: ${snapshot.flight.serviceDate}   Aircraft: ${snapshot.flight.aircraft}`);
-  document.text(`Purser: ${snapshot.purser.name} <${snapshot.purser.email}>`);
+  document.text(`Flight: ${snapshot.flight.flightNumber}   Service date: ${snapshot.flight.serviceDate}${snapshot.flight.aircraft ? `   Aircraft: ${snapshot.flight.aircraft}` : ""}`);
+  for (const purser of snapshot.pursers?.length ? snapshot.pursers : [snapshot.purser])
+    document.text(`Purser: ${purser.name} <${purser.email}>`);
   document.text(`Submitted: ${snapshot.submittedAt || "Not submitted"}   Approved: ${snapshot.approvedAt || "Not approved"}`);
   document.moveDown(0.5);
-  heading("Sectors");
-  for (const sector of snapshot.flight.sectors)
-    document.font("Helvetica").fontSize(8).text(`Sector ${sector.sequence}: ${sector.origin} -> ${sector.destination} | ${sector.scheduledDeparture} - ${sector.scheduledArrival} | Economy ${sector.economyPax}, Business ${sector.businessPax}`);
-  document.moveDown(0.5);
+  if (snapshot.flight.sectors.length) {
+    heading("Sectors");
+    for (const sector of snapshot.flight.sectors)
+      document.font("Helvetica").fontSize(8).text(`Sector ${sector.sequence}: ${sector.origin} -> ${sector.destination} | ${sector.scheduledDeparture} - ${sector.scheduledArrival} | Economy ${sector.economyPax}, Business ${sector.businessPax}`);
+    document.moveDown(0.5);
+  }
   heading("Catering lines");
   for (const line of snapshot.lines) {
     const detail = `${line.sector} ${line.cabin} ${line.item} (${line.sku}, ${line.unit})\nLoaded ${line.loaded} | Consumed ${line.consumed} | Returned ${line.returned} | Spoiled ${line.spoiled} | Discarded ${line.discarded} | Unexplained ${line.unexplained}${line.remarks ? `\nRemark: ${line.remarks}` : ""}`;

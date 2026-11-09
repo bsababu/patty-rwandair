@@ -53,6 +53,7 @@ const base = {
         sectors: [{ sequence: 1, origin: "KGL", destination: "NBO", scheduledDeparture: "2026-11-04T06:00:00Z", scheduledArrival: "2026-11-04T08:00:00Z", economyPax: 100, businessPax: 10 }],
     },
     purser: { id: "u1", name: "Mugisha Éric", email: "purser@example.test" },
+    pursers: [{ id: "u1", name: "Mugisha Éric", email: "purser@example.test" }, { id: "u2", name: "Uwase Keza", email: "relief@example.test" }],
     notes: "Variance reviewed",
     submittedAt: "2026-11-04T09:00:00Z",
     approvedAt: null,
@@ -62,11 +63,13 @@ const base = {
 (0, node_test_1.default)("CSV preserves all report metadata and neutralizes formula text", () => {
     const csv = (0, reports_1.serializeReportCsv)(base);
     strict_1.default.match(csv, /Mugisha Éric/);
+    strict_1.default.match(csv, /Uwase Keza/);
     strict_1.default.match(csv, /'=?SUM\(A1:A2\)/);
     strict_1.default.match(csv, /Variance reviewed/);
     strict_1.default.match(csv, /\r\n/);
     const records = (0, imports_1.parseCsv)(csv);
     strict_1.default.ok(records.every((row) => row.length === records[0].length));
+    strict_1.default.equal(records.filter((row) => row[0] === "TEAM_MEMBER").length, 2);
     const actorColumn = records[0].indexOf("review_actor");
     strict_1.default.equal(records.find((row) => row[0] === "REVIEW")?.[actorColumn], "Mugisha Éric");
     for (const remarks of ["=SUM(A1:A2)", "\t=1+1", "\r@SUM(A1:A2)", "  +1+1", "-1+1"]) {
@@ -101,4 +104,5 @@ const base = {
     strict_1.default.match(extracted, /Item 99/);
     strict_1.default.match(extracted, /Remark/);
     strict_1.default.match(extracted, /Mugisha Éric/);
+    strict_1.default.match(extracted, /Uwase Keza/);
 });

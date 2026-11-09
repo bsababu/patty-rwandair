@@ -8,6 +8,7 @@ import {
   isoCalendarDate,
   nonnegativeInteger,
   normalizeFlightNumber,
+  optionalImportHeaders,
   parseCsv,
   parseIsoTimestamp,
   importHeaders,
@@ -38,12 +39,22 @@ test("requires explicit timestamp offsets and rejects invalid calendar times", (
 
 test("shipped flight and catering templates describe the same flight/date and valid sectors", () => {
   const flights = csvRecords(readFileSync(resolve(process.cwd(), "../../docs/flights-template.csv"), "utf8"), importHeaders.FLIGHTS);
-  const catering = csvRecords(readFileSync(resolve(process.cwd(), "../../docs/catering-template.csv"), "utf8"), importHeaders.CATERING);
+  const catering = csvRecords(readFileSync(resolve(process.cwd(), "../../docs/catering-template.csv"), "utf8"), importHeaders.CATERING, optionalImportHeaders.CATERING);
   const sectors = new Set(flights.map(({ data }) => `${normalizeFlightNumber(data.flight_number)}|${data.flight_date}|${data.sector_sequence}`));
   for (const { data, errors } of catering) {
-    assert.equal(sectors.has(`${normalizeFlightNumber(data.flight_number)}|${data.flight_date}|${data.sector_sequence}`), true);
+    assert.equal(sectors.has(`${normalizeFlightNumber(data.flight_number)}|${data.service_date || data.flight_date}|${data.sector_sequence || "1"}`), true);
     assert.deepEqual(errors, []);
   }
+});
+
+test("accepts the minimal catering template", () => {
+  const rows = csvRecords(
+    "flight_number,service_date,item,loaded\nWB700,2026-11-04,Chicken brochette meal,1\n",
+    importHeaders.CATERING,
+    optionalImportHeaders.CATERING,
+  );
+  assert.equal(rows[0].data.sector_sequence, undefined);
+  assert.deepEqual(rows[0].errors, []);
 });
 
 test("normalizes flight numbers consistently", () => {

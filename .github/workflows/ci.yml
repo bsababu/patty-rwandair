@@ -66,6 +66,10 @@ jobs:
         run: |
           psql "$DATABASE_URL" -c 'CREATE DATABASE wingsbalance_test;'
           DATABASE_URL="$TEST_DATABASE_URL" npm run prisma:migrate
+      - name: Prepare isolated browser database
+        run: |
+          psql "$DATABASE_URL" -c 'CREATE DATABASE wingsbalance_browser_test;'
+          DATABASE_URL=postgresql://wingsbalance:ci-only@127.0.0.1:5432/wingsbalance_browser_test npm run prisma:migrate
       - run: npm test
       - run: npm run build
       - name: Install browser test dependencies
@@ -76,6 +80,15 @@ jobs:
       - name: Verify the operational workflow in a browser
         working-directory: .
         run: npm run test:e2e
+        env:
+          TEST_DATABASE_URL: postgresql://wingsbalance:ci-only@127.0.0.1:5432/wingsbalance_browser_test
+      - name: Retain browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: test-results/
+          retention-days: 7
 
   migrate:
     name: Apply production Prisma migrations

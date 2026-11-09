@@ -30,12 +30,17 @@ const imports_1 = require("./imports");
 });
 (0, node_test_1.default)("shipped flight and catering templates describe the same flight/date and valid sectors", () => {
     const flights = (0, imports_1.csvRecords)((0, node_fs_1.readFileSync)((0, node_path_1.resolve)(process.cwd(), "../../docs/flights-template.csv"), "utf8"), imports_1.importHeaders.FLIGHTS);
-    const catering = (0, imports_1.csvRecords)((0, node_fs_1.readFileSync)((0, node_path_1.resolve)(process.cwd(), "../../docs/catering-template.csv"), "utf8"), imports_1.importHeaders.CATERING);
+    const catering = (0, imports_1.csvRecords)((0, node_fs_1.readFileSync)((0, node_path_1.resolve)(process.cwd(), "../../docs/catering-template.csv"), "utf8"), imports_1.importHeaders.CATERING, imports_1.optionalImportHeaders.CATERING);
     const sectors = new Set(flights.map(({ data }) => `${(0, imports_1.normalizeFlightNumber)(data.flight_number)}|${data.flight_date}|${data.sector_sequence}`));
     for (const { data, errors } of catering) {
-        strict_1.default.equal(sectors.has(`${(0, imports_1.normalizeFlightNumber)(data.flight_number)}|${data.flight_date}|${data.sector_sequence}`), true);
+        strict_1.default.equal(sectors.has(`${(0, imports_1.normalizeFlightNumber)(data.flight_number)}|${data.service_date || data.flight_date}|${data.sector_sequence || "1"}`), true);
         strict_1.default.deepEqual(errors, []);
     }
+});
+(0, node_test_1.default)("accepts the minimal catering template", () => {
+    const rows = (0, imports_1.csvRecords)("flight_number,service_date,item,loaded\nWB700,2026-11-04,Chicken brochette meal,1\n", imports_1.importHeaders.CATERING, imports_1.optionalImportHeaders.CATERING);
+    strict_1.default.equal(rows[0].data.sector_sequence, undefined);
+    strict_1.default.deepEqual(rows[0].errors, []);
 });
 (0, node_test_1.default)("normalizes flight numbers consistently", () => {
     strict_1.default.equal((0, imports_1.normalizeFlightNumber)("wb435"), "WB 435");

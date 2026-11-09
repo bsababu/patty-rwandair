@@ -68,13 +68,18 @@ model User {
   createdAt DateTime @default(now())
   assignments CrewAssignment[]
   reports FlightReport[]
+  cateringRunReports CateringRunReport[]
   approvals Approval[]
+  cateringRunApprovals CateringRunApproval[]
   auditEvents AuditEvent[]
   notifications Notification[]
   crewSubmissions CrewSubmission[]
   importBatches ImportBatch[]
   leadFlights Flight[] @relation("FlightLead")
   cateringLists CateringList[] @relation("CateringListOwner")
+  cateringLeadRuns CateringList[] @relation("CateringListLead")
+  cateringPurserRuns CateringList[] @relation("CateringListPurser")
+  cateringPurserAssignments CateringListPurser[] @relation("CateringListPurserAssignment")
   sessions Session[]
 }
 
@@ -166,6 +171,7 @@ model CatalogItem {
   manifestLines ManifestLine[]
   movements StockMovement[]
   cateringListLines CateringListLine[]
+  cateringRunReportLines CateringRunReportLine[]
 }
 model ItemPrice {
   id String @id @default(uuid())
@@ -278,6 +284,8 @@ model StockMovement {
   quantity Int
   reason MovementReason
   flightId String?
+  runId String?
+  run CateringList? @relation("CateringRunMovements", fields: [runId], references: [id])
   reversalOfId String?
   operationId String @unique
   unitCostMinor BigInt
@@ -285,6 +293,7 @@ model StockMovement {
   createdAt DateTime @default(now())
   @@index([itemId, createdAt])
   @@index([flightId])
+  @@index([runId])
 }
 model Forecast {
   id String @id @default(uuid())
@@ -354,12 +363,30 @@ model CateringList {
   status String @default("READY")
   createdById String
   createdBy User @relation("CateringListOwner", fields: [createdById], references: [id])
+  leadId String?
+  lead User? @relation("CateringListLead", fields: [leadId], references: [id])
+  purserId String?
+  purser User? @relation("CateringListPurser", fields: [purserId], references: [id])
+  pursers CateringListPurser[]
+  reportingStartedAt DateTime?
   lines CateringListLine[]
+  report CateringRunReport?
+  stockMovements StockMovement[] @relation("CateringRunMovements")
   flights Flight[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@unique([flightNumber, serviceDate])
   @@index([flightNumber, serviceDate, status])
+}
+model CateringListPurser {
+  id String @id @default(uuid())
+  cateringListId String
+  cateringList CateringList @relation(fields: [cateringListId], references: [id], onDelete: Cascade)
+  userId String
+  user User @relation("CateringListPurserAssignment", fields: [userId], references: [id], onDelete: Restrict)
+  assignedAt DateTime @default(now())
+  @@unique([cateringListId, userId])
+  @@index([userId, assignedAt])
 }
 model CateringListLine {
   id String @id @default(uuid())
@@ -373,9 +400,75 @@ model CateringListLine {
   planned Int
   approved Int
   loaded Int
+  consumed Int @default(0)
+  returned Int @default(0)
+  spoiled Int @default(0)
+  discarded Int @default(0)
+  remarks String?
   overrideReason String?
   @@unique([cateringListId, sectorSequence, cabin, itemId])
   @@index([itemId])
+}
+model CateringRunReport {
+  id String @id @default(uuid())
+  cateringListId String @unique
+  cateringList CateringList @relation(fields: [cateringListId], references: [id])
+  purserId String
+  purser User @relation(fields: [purserId], references: [id])
+  purserName String
+  notes String?
+  status ReportStatus @default(DRAFT)
+  version Int @default(1)
+  submittedAt DateTime?
+  approvedAt DateTime?
+  lines CateringRunReportLine[]
+  revisions CateringRunReportRevision[]
+  approvals CateringRunApproval[]
+}
+model CateringRunReportLine {
+  id String @id @default(uuid())
+  reportId String
+  report CateringRunReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  cateringListLineId String?
+  itemId String
+  item CatalogItem @relation(fields: [itemId], references: [id])
+  itemSku String
+  itemName String
+  unit String
+  sectorSequence Int
+  cabin Cabin
+  loaded Int
+  consumed Int
+  returned Int
+  spoiled Int
+  discarded Int
+  unexplained Int
+  remarks String?
+  revision Int @default(1)
+  @@unique([reportId, cateringListLineId, revision])
+  @@index([reportId, revision])
+}
+model CateringRunReportRevision {
+  id String @id @default(uuid())
+  reportId String
+  report CateringRunReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  revision Int
+  snapshot Json
+  createdAt DateTime @default(now())
+  @@unique([reportId, revision])
+  @@index([reportId, createdAt])
+}
+model CateringRunApproval {
+  id String @id @default(uuid())
+  reportId String
+  report CateringRunReport @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  actorId String
+  actor User @relation(fields: [actorId], references: [id])
+  decision ReportStatus
+  reason String?
+  createdAt DateTime @default(now())
+  actorName String
+  revision Int @default(1)
 }
 model ImportBatch {
   id String @id @default(uuid())

@@ -11,7 +11,7 @@
     "start": "next start",
     "test": "npm --prefix apps/api test",
     "test:e2e": "playwright test",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern apps/api/dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern apps/api/dist --ignore-pattern .next --ignore-pattern .next-e2e"
   },
   "dependencies": {
     "next": "16.2.6",

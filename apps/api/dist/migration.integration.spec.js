@@ -22,15 +22,21 @@ function legacySchema() {
     sql(`CREATE SCHEMA ${schema}`);
     for (const name of (0, node_fs_1.readdirSync)(migrations).sort().filter((name) => name < latest))
         apply(name);
-    return { sql, apply };
+    return { sql, apply, cleanup: () => sql(`DROP SCHEMA ${schema} CASCADE`) };
 }
-(0, node_test_1.default)("migration recovers archived service dates and preserves legacy report revisions", { skip: !testUrl }, () => {
-    const { sql, apply } = legacySchema();
+(0, node_test_1.default)("migration recovers archived service dates and preserves legacy report revisions", { skip: !testUrl }, (t) => {
+    const { sql, apply, cleanup } = legacySchema();
+    t.after(cleanup);
     sql(`
     INSERT INTO "User" (id,email,"passwordHash",name,role) VALUES ('u1','migration@verification.test','not-a-login','Current staff name','ATTENDANT');
     INSERT INTO "Flight" (id,"flightNumber","flightDate",aircraft,status) VALUES ('f1','WB 435','2026-09-05 06:00:00','A330','COMPLETED');
+    INSERT INTO "Flight" (id,"flightNumber","flightDate",aircraft,status) VALUES ('cancelled','WB 436','2026-09-05 10:00:00','A330','CANCELLED');
+    INSERT INTO "CrewAssignment" (id,"flightId","userId",duty) VALUES ('cancelled-crew','cancelled','u1','PURSER');
     INSERT INTO "Sector" (id,"flightId",sequence,origin,destination,"scheduledDeparture","scheduledArrival","economyPax","businessPax") VALUES ('s1','f1',1,'KGL','NBO','2026-09-05 06:00:00','2026-09-05 08:00:00',100,10);
     INSERT INTO "CatalogItem" (id,sku,"nameEn","nameFr",category,unit) VALUES ('i1','MEAL-MIGRATION','Meal','Repas','Meal','meal');
+    INSERT INTO "Sector" (id,"flightId",sequence,origin,destination,"scheduledDeparture","scheduledArrival","economyPax","businessPax") VALUES ('cancelled-sector','cancelled',1,'KGL','NBO','2026-09-05 10:00:00','2026-09-05 12:00:00',100,10);
+    INSERT INTO "Manifest" (id,"flightId","sectorId",cabin) VALUES ('cancelled-manifest','cancelled','cancelled-sector','ECONOMY');
+    INSERT INTO "ManifestLine" (id,"manifestId","itemId",suggested,planned,approved,loaded) VALUES ('cancelled-line','cancelled-manifest','i1',5,5,5,5);
     INSERT INTO "Manifest" (id,"flightId","sectorId",cabin) VALUES ('m1','f1','s1','ECONOMY');
     INSERT INTO "ManifestLine" (id,"manifestId","itemId",suggested,planned,approved,loaded,consumed,returned) VALUES ('l1','m1','i1',10,10,10,10,7,3);
     INSERT INTO "FlightReport" (id,"flightId","purserId","purserName",status,version,"submittedAt") VALUES ('r1','f1','u1','Name at submission','RETURNED',2,'2026-11-04 09:00:00');
@@ -50,9 +56,19 @@ function legacySchema() {
     strict_1.default.equal(sql(`SELECT "actorName" FROM "Approval" WHERE id='a1'`), "Current staff name");
     const retained = sql(`SELECT snapshot->'flight'->'sectors'->0->>'scheduledDeparture' FROM "ReportRevision" WHERE "reportId"='r1' AND revision=1`);
     strict_1.default.equal(new Date(retained).toISOString(), "2026-09-05T06:00:00.000Z");
+    // Exercise every new migration on populated legacy data, not only an empty database.
+    for (const name of (0, node_fs_1.readdirSync)(migrations).sort().filter((name) => /^\d{14}_/.test(name) && name > latest))
+        apply(name);
+    strict_1.default.equal(sql(`SELECT c.status FROM "CateringList" c JOIN "Flight" f ON f."cateringListId"=c.id WHERE f.id='cancelled'`), "CANCELLED");
+    strict_1.default.equal(sql(`SELECT count(*) FROM "CateringListPurser" p JOIN "Flight" f ON f."cateringListId"=p."cateringListId" WHERE f.id='cancelled' AND p."userId"='u1'`), "1");
+    strict_1.default.equal(sql(`SELECT count(*) FROM "CateringRunReportRevision"`), "2");
+    strict_1.default.equal(sql(`SELECT snapshot->'purser'->>'name' FROM "CateringRunReportRevision" WHERE revision=1`), "Name at submission");
+    strict_1.default.equal(sql(`SELECT reason FROM "CateringRunApproval"`), "Recount");
+    strict_1.default.equal(sql(`SELECT consumed FROM "CateringListLine" c JOIN "Flight" f ON f."cateringListId"=c."cateringListId" WHERE f.id='f1'`), "7");
 });
-(0, node_test_1.default)("migration stops on duplicate canonical flight/date keys instead of merging flights", { skip: !testUrl }, () => {
-    const { sql, apply } = legacySchema();
+(0, node_test_1.default)("migration stops on duplicate canonical flight/date keys instead of merging flights", { skip: !testUrl }, (t) => {
+    const { sql, apply, cleanup } = legacySchema();
+    t.after(cleanup);
     sql(`INSERT INTO "Flight" (id,"flightNumber","flightDate",aircraft) VALUES ('a','WB 700','2026-11-04 06:00:00','A330'),('b','WB 700','2026-11-04 12:00:00','A330')`);
     strict_1.default.throws(() => apply(latest), (error) => error instanceof Error && error.message.includes("duplicate flight/date records"));
     strict_1.default.equal(sql(`SELECT COUNT(*) FROM "Flight"`), "2");

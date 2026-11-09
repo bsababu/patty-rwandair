@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.importHeaders = void 0;
+exports.optionalImportHeaders = exports.importHeaders = void 0;
 exports.parseCsv = parseCsv;
 exports.csvRecords = csvRecords;
 exports.normalizeFlightNumber = normalizeFlightNumber;
@@ -23,14 +23,20 @@ exports.importHeaders = {
     ],
     CATERING: [
         "flight_number",
+        "loaded",
+    ],
+};
+exports.optionalImportHeaders = {
+    CATERING: [
+        "service_date",
         "flight_date",
-        "sector_sequence",
-        "cabin",
+        "item",
         "item_sku",
+        "cabin",
+        "sector_sequence",
         "suggested",
         "planned",
         "approved",
-        "loaded",
         "override_reason",
     ],
 };
@@ -75,7 +81,7 @@ function parseCsv(source) {
         records.push(record);
     return records;
 }
-function csvRecords(source, required) {
+function csvRecords(source, required, optional = []) {
     const records = parseCsv(source);
     if (records.length < 2)
         throw new Error("CSV contains no data rows");
@@ -88,7 +94,7 @@ function csvRecords(source, required) {
     const missing = required.filter((header) => !headers.includes(header));
     if (missing.length)
         throw new Error(`Missing CSV columns: ${missing.join(", ")}`);
-    const unknown = headers.filter((header) => !required.includes(header));
+    const unknown = headers.filter((header) => !required.includes(header) && !optional.includes(header));
     if (unknown.length)
         throw new Error(`Unknown CSV columns: ${unknown.join(", ")}`);
     return records.slice(1).map((values, index) => ({

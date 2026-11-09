@@ -215,7 +215,7 @@ It is not part of the Vercel production pipeline.
   stale or the deployment is using an outdated image. Rebuild the stack.
 - A proxy connection error means the API container is not healthy. Check
   `docker compose ps` and `docker compose logs api`.
-- `Database schema is out of date` or `Flight.serviceDate does not exist` means
+- `Database schema is out of date` or a missing run column means
   the API and database are on different migration versions. Run
   `DATABASE_URL=<same-database-url> npm --prefix apps/api run prisma:migrate`,
   then restart the API. For host development with `apps/api/.env.local`, use
@@ -249,16 +249,16 @@ unless `NEXT_PUBLIC_DEMO_PERSONAS=true` is enabled at build time.
 
 The fictional crew directory also contains `attendant2@wings.rw`,
 `attendant3@wings.rw` and `attendant4@wings.rw`, using the same development
-password. These are additional eligible Flight Purser accounts; each flight has
-one assigned purser. Internal role codes remain unchanged for compatibility.
+password. These are additional eligible Flight Purser accounts; a run may have
+multiple assigned Pursers. Internal role codes remain unchanged for compatibility.
 
 ## Role quick guide
 
 | Role | Use the application to |
 | --- | --- |
-| Flight Purser | Open the assigned flight after arrival, enter consumed/returned/spoiled/discarded/unexplained quantities, add notes, and submit one consolidated leftovers report. |
-| Cabin Services | Assign one Flight Purser, attach the catering list matching flight number and service date, review every sector/cabin, return corrections, or forward the report to Catering. |
-| Catering | Import flights first, import matching catering lists, assign Cabin Services leads, maintain stock/prices, review forwarded reports, and approve once to post the ledger. |
+| Flight Purser | Open any assigned catering run and enter consumed quantity per item plus optional remarks. Returned quantity is calculated automatically. Multiple Pursers may work on the same run. |
+| Cabin Services | Assign as many Flight Pursers as the service needs, monitor per-run metrics, preview the report, then click **Send to Catering** when the service is complete. |
+| Catering | Import runs, assign the Cabin Services lead, maintain stock/prices, review forwarded reports, and approve once to post the ledger. |
 | Director | Read aggregate approved-cost, waste, savings, and operational KPI views; no raw report or crew-assignment edits. |
 | Admin | Create/deactivate accounts, reset access, and review the audit log; do not perform operational approvals. |
 
@@ -271,29 +271,29 @@ Set `COOKIE_SECURE=true` behind production HTTPS.
 
 ### Leftovers reporting workflow
 
-1. Cabin Services assigns exactly one Flight Purser.
-2. After the final scheduled arrival, the Flight Purser opens the flight and
-   confirms the prepared report from the saved quantities.
-3. The report contains the date, purser name, flight number, route, sectors,
-   cabins, item quantities, variance notes and review status.
-4. Cabin Services reviews and forwards the report to Catering. Only Catering
-   approval posts the stock ledger.
+1. Catering imports the run and assigns an active Cabin Services lead.
+2. Cabin Services assigns one or more Flight Pursers to the run.
+3. Assigned Pursers open the run and record consumed quantity per item. The system derives returned quantity from loaded minus consumed.
+4. The report contains the date, purser name, flight number, cabins, item
+   quantities, variance notes and review status.
+5. Cabin Services checks the per-run metrics, previews the report, then clicks **Send to Catering**. Only Catering approval posts the stock ledger.
 
-The purser reviews all sectors and cabins before confirming submission. Reports
-can be completed after a flight is marked completed; cancelled flights cannot
-be edited. Pending reports become overdue after the last scheduled arrival.
-There is no scheduled submission or email service.
+Assigned Pursers review all imported catering lines before saving their shared
+quantities. There is no schedule dependency or automatic email service.
 
-Report endpoints are `GET /api/v1/flights/:id/report`,
-`GET /api/v1/flights/:id/report.csv`, and `GET /api/v1/flights/:id/report.pdf`.
-Submission uses `POST /api/v1/flights/:id/reports`. The former individual
-`crew-submissions` mutation is retired. Submitted revisions retain their own
-flight, purser, item and quantity snapshots. Returned reports open the current
-saved draft, while earlier submitted revisions remain available for audit.
+Report endpoints are `GET /api/v1/runs/:id/report`,
+`GET /api/v1/runs/:id/report.csv`, and `GET /api/v1/runs/:id/report.pdf`.
+Pursers save shared drafts with `PATCH /api/v1/runs/:id/draft`; the payload contains
+only consumed quantities and optional remarks. Cabin Services previews the current
+run with `GET /api/v1/runs/:id/report/preview` and generates the final report with
+`POST /api/v1/runs/:id/report`. Generated revisions retain
+their own run, purser, item and quantity snapshots. Returned reports open the
+current saved draft, while earlier submitted revisions remain available for audit.
 
 ## Stock invariants
 
-`unexplained = loaded - consumed - returned - spoiled - discarded`.
+For current reports, `returned = loaded - consumed`; historical reports may still
+contain the older spoiled, discarded and unexplained fields.
 
 Official inventory is changed only by Procurement approval. Consumption,
 spoilage, discard and unexplained loss reduce stock; returns are informational
@@ -303,10 +303,9 @@ on-hand, reserved and available quantities; reorder alerts use available stock.
 Quantity requests carry an idempotency key and manifest version so retries are
 safe and concurrent edits are rejected explicitly.
 
-Only Flight Purser manifest drafts are queued offline. Final submission, approval,
-price and administrative mutations require a live connection. Cached flight
-manifests and queued drafts are isolated by signed-in user and cleared at
-logout; Procurement and Director responses are never cached.
+Final submission, approval, price and administrative mutations require a live
+connection. Run drafts are isolated by signed-in user; Procurement and Director
+responses are never cached.
 
 ## Forecast model
 
@@ -326,17 +325,30 @@ The forecast adapter uses recent passenger-normalized consumption. It prefers a 
 ## Catering CSV imports
 
 Catering users open **Upload data** from the desktop sidebar or mobile
-workspace navigation. Import Flights first, then the matching Catering file:
+workspace navigation. The upload screen accepts the catering file only:
 
-- `docs/flights-template.csv` creates a flight with one or more ordered sectors
-  and cabin passenger counts.
-- `docs/catering-template.csv` creates or updates a named catering list by
-  flight date, sector, cabin and active catalog SKU. It never changes prices.
-  Cabin Services can select that list only when its flight number and date match.
+- `docs/catering-template.csv` creates or updates a catering run with flight
+  number, service date, item, and loaded quantity. Cabin defaults to Economy;
+  add the optional `cabin` column for Business rows. The optional
+  `sector_sequence` column defaults to `1` when a multi-sector file needs it.
+  Suggested, planned, and approved quantities default to loaded quantity.
+- Flight schedules are outside this workflow. The run is immediately available
+  for lead and Flight Purser assignment after import.
+
+The Catering dashboard uses a run work queue. Each run moves through lead
+assignment, multiple-Purser assignment, leftovers reporting, report generation,
+and approval.
+
+Every item must match one active Catering catalog item by name or SKU. The
+importer does not create catalog items or prices from a CSV.
+
+The legacy flight import template remains available as an archived reference,
+but flight import and schedule management are removed from the Catering API
+and workspace. The Catering role works only with run records.
 
 Crew assignment is intentionally not a CSV import. Cabin Services selects one
-active Flight Purser in the application;
-the API rejects overlapping crew assignments.
+or more active Flight Pursers in the application; assignments are unique per
+run and can be changed until reporting starts.
 
 Every upload has a preview stage with row-level errors. The server stores the
 original CSV and parsed preview as an import batch, then reparses and revalidates
@@ -349,19 +361,19 @@ all actions are written to the audit log.
 The pilot accepts UTF-8 CSV files up to 1 MB and 1,000 data rows. Flight numbers
 may be entered as `WB435` or `WB 435`; they are normalized to `WB 435`.
 
-Both UI downloads come from `packages/contracts/src/import-templates.ts` and
-match the examples in `docs/`. The service date is a calendar date independent
-of UTC departure time. Only the first sector must depart on that calendar date;
-later sectors can depart on subsequent days. Departure/arrival timestamps need
-explicit UTC offsets, and sectors must connect in route and time order.
-Re-previewing refreshes row errors after dependencies change. Invalid previews
-offer a row-error CSV download.
+The UI download comes from `packages/contracts/src/import-templates.ts` and
+matches the example in `docs/`. `service_date` is a calendar date independent
+of UTC departure time. Re-previewing refreshes row errors after dependencies
+change. Invalid previews offer a row-error CSV download.
 
 ## Verification and release
 
+See the [workspace guide](docs/workspace-guide.md) for role-specific actions,
+report previews, notifications, and mobile navigation.
+
 The API integration suite runs only when `TEST_DATABASE_URL` is supplied and
 must target an isolated test database. It creates its own fixture users,
-sessions, flights and stock. Ordinary unit tests do not connect to a database.
+sessions, runs and stock. Ordinary unit tests do not connect to a database.
 
 Run `npm test` for unit tests. With a migrated isolated database, run
 `TEST_DATABASE_URL=<isolated-test-url> npm test` to include PostgreSQL workflow
@@ -382,7 +394,7 @@ Legacy report snapshots preserve the historical quantities and metadata still
 retained in the database. The report identifies reconstructed historical records;
 metadata absent from older revisions is not invented.
 
-Verify a complete import, purser assignment, report submission, returned
-correction, Cabin Services forwarding and Catering approval in staging. Confirm
-PDF/CSV totals match the report and retrying approval leaves the ledger unchanged.
+Verify a complete run import, lead and multiple-Purser assignment, shared draft
+updates, lead report generation and Catering approval in staging.
+Confirm PDF/CSV totals match the report and retrying approval leaves the ledger unchanged.
 Production requires HTTPS, secure session cookies and an explicit web origin.

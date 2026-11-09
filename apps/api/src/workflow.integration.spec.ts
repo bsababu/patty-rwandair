@@ -54,17 +54,17 @@ test("real PostgreSQL: imports, purser reports, corrections and once-only stock 
   let flightId = "";
   let reportId = "";
   let reportVersion = 0;
-  let firstPreviewId = "";
   let firstSnapshot: unknown;
   type Preview = { id: string; errorCount: number; rows: Array<{ errors: string[] }> };
   type Detail = { id: string; version: number; manifests: Array<{ id: string; version: number; lines: Array<{ id: string; loaded: number; consumed: number; returned: number; spoiled: number; discarded: number }> }> };
   const manifests = () => call<Detail>("manifest", flightId, purserReq);
   try {
-    await t.test("refreshes missing-flight errors after a valid overnight flight import", async () => {
+    await t.test("imports catering before the operational flight schedule exists", async () => {
+      await assert.rejects(call("flights", cateringReq), (error) => status(error) === 403);
       const before = await call<Preview>("previewImport", { type: "CATERING", fileName: "catering.csv", csv: cateringCsv }, cateringReq);
-      firstPreviewId = before.id;
-      assert.equal(before.errorCount, 4);
+      assert.equal(before.errorCount, 0, JSON.stringify(before.rows));
       assert.equal(before.rows.some((row) => row.errors.some((error) => error.includes("Duplicate"))), false);
+      await call("commitImport", before.id, cateringReq);
       const flightPreview = await call<Preview>("previewImport", { type: "FLIGHTS", fileName: "flights.csv", csv: flightCsv }, cateringReq);
       assert.equal(flightPreview.errorCount, 0, JSON.stringify(flightPreview.rows));
       const result = await call<{ ids: string[] }>("commitImport", flightPreview.id, cateringReq);
@@ -72,12 +72,15 @@ test("real PostgreSQL: imports, purser reports, corrections and once-only stock 
       const flight = await db.flight.findUniqueOrThrow({ where: { id: flightId } });
       assert.equal(flight.serviceDate.toISOString().slice(0, 10), "2026-11-04");
       assert.equal(flight.flightDate.toISOString().slice(0, 10), "2026-11-03");
-      const refreshed = await call<Preview>("previewImport", { type: "CATERING", fileName: "catering.csv", csv: cateringCsv }, cateringReq);
-      assert.equal(refreshed.id, firstPreviewId);
-      assert.equal(refreshed.errorCount, 0, JSON.stringify(refreshed.rows));
-      await call("commitImport", refreshed.id, cateringReq);
       const list = await db.cateringList.findUniqueOrThrow({ where: { flightNumber_serviceDate: { flightNumber: flight.flightNumber, serviceDate: flight.serviceDate } } });
-      await db.flight.update({ where: { id: flightId }, data: { leadId: accounts[1].id } });
+      const queue = await call<Array<{ id: string; assignmentStatus: string; matchingFlight: { id: string } | null }>>("procurementCateringWorkQueue", cateringReq);
+      const queueItem = queue.find((item) => item.id === list.id);
+      assert.equal(queueItem?.assignmentStatus, "READY_TO_ATTACH");
+      assert.equal(queueItem?.matchingFlight?.id, flightId);
+      await call("assignCateringList", list.id, { flightId, operationId: randomUUID() }, cateringReq);
+      assert.equal((await db.flight.findUniqueOrThrow({ where: { id: flightId } })).cateringListId, list.id);
+      assert.ok((await db.manifest.count({ where: { flightId } })) > 0);
+      await call("assignFlightLead", flightId, { leadId: accounts[1].id }, cateringReq);
       await call("attachCateringList", flightId, list.id, { operationId: randomUUID() }, leadReq);
     });
 
